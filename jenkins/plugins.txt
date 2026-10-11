@@ -1,0 +1,13 @@
+configuration-as-code
+workflow-aggregator
+git
+gitlab-plugin
+credentials-binding
+hashicorp-vault-plugin
+pipeline-stage-view
+timestamper
+ws-cleanup
+htmlpublisher
+# multibranch: สแกน branch ใหม่ทันทีที่ GitLab ยิง webhook และ build tag อัตโนมัติ
+multibranch-scan-webhook-trigger
+basic-branch-build-strategies

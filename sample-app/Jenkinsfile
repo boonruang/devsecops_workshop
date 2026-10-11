@@ -1,0 +1,330 @@
+// Pipeline หลักของ sample-app แบบ Multibranch เลียนแบบ pipeline จริงของ glo-portal
+//
+//   branch develop  ->  dev   TAG dev-build-<N>   http://LAB_HOST:8088   container glo-dev-sample-app
+//   branch uat      ->  uat   TAG uat-build-<N>   http://LAB_HOST:8089   container glo-uat-sample-app
+//   git tag (v1.0.0)->  prd   TAG = ชื่อ tag       http://LAB_HOST:8090   container glo-prd-sample-app
+//   branch อื่น      ->  ci    รันแค่ Vault + Gate 1-2 ไม่ build ไม่ deploy
+//
+// โครง stage ตาม glo-portal: Checkout > Prepare > Environment Check > Vault > Gate > Build > Trivy > Deploy > Verify
+// + แจ้งผลใน post (ของจริงส่ง LINE) ส่วนที่ตั้งใจแก้จากของจริง (ดู README หัวข้อ "เทียบกับ pipeline จริง"):
+//   - Sonar/Quality Gate เปิดทุก env (ของจริงปิดด้วย when { false }) และ branch อื่นก็ต้องผ่าน gate
+//   - trivy image สแกนก่อน deploy และตกจริง (ของจริงสแกนหลัง push)
+//   - อ่าน Vault ด้วย jq และ revoke token ทุกครั้ง (ของจริง grep/sed และ token ผ่าน Groovy string)
+//   - Environment Check ตกทันทีถ้าเครื่องมือหรือ server ไม่พร้อม (ของจริงพิมพ์ [FAIL] แล้วไปต่อ)
+//
+// ค่า IMAGE_REGISTRY, TRIVY_SERVER, SONAR_HOST_URL, BUILDKIT_HOST, DOCKER_HOST, WEBAPP_PORT_* มาจาก
+// environment ของ container jenkins (docker-compose.yml) ไม่ต้องตั้งใน job
+
+// ห่อ stage แบบที่ glo-portal ทำ (จด FAILED_STAGE / FAILED_MSG ไว้แจ้งเตือน) แต่เขียนครั้งเดียว ไม่ต้อง try/catch ทุก stage
+def tracked(Closure body) {
+  try {
+    body()
+  } catch (e) {
+    env.FAILED_STAGE = env.STAGE_NAME
+    def msg = e.getMessage() ?: e.toString()
+    env.FAILED_MSG = msg.length() > 300 ? msg.substring(0, 300) : msg
+    throw e
+  }
+}
+
+// ข้อความแจ้งผล ของจริงส่งเข้า LINE Messaging API ใน lab พิมพ์ลง console แทน
+def notify(String status) {
+  def lines = [
+    "${status == 'SUCCESS' ? '✅' : '❌'} Jenkins Pipeline ${status}",
+    '━━━━━━━━━━━━━━━━━━━━',
+    "Job    : ${env.JOB_NAME}",
+    "Build  : #${env.BUILD_NUMBER}",
+    "Branch : ${env.BRANCH_NAME ?: '-'}",
+    "Env    : ${env.ENV_NAME ?: '-'}",
+    "Tag    : ${env.TAG ?: '-'}",
+    "Image  : ${env.TAG ? env.IMAGE + ':' + env.TAG : '-'}",
+  ]
+  if (status == 'SUCCESS' && env.DEPLOYABLE == 'true') {
+    lines << "App    : http://${env.LAB_HOST}:${env.APP_PORT}"
+  }
+  if (status != 'SUCCESS') {
+    lines << "Failed Stage : ${env.FAILED_STAGE ?: '-'}"
+    lines << "Error        : ${env.FAILED_MSG ?: '-'}"
+  }
+  lines << "Date   : ${env.BUILD_DATE ?: '-'}"
+  lines << "URL    : ${env.BUILD_URL}"
+  echo "──── แจ้งเตือน (ของจริงส่ง LINE ตรงนี้) ────\n" + lines.join('\n')
+}
+
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(name: 'DEPLOY', defaultValue: true, description: 'deploy หลังผ่านทุก gate (มีผลเฉพาะ develop, uat และ tag)')
+  }
+
+  environment {
+    IMAGE = "${env.IMAGE_REGISTRY}/workshop/sample-app"
+  }
+
+  options {
+    timestamps()
+    timeout(time: 30, unit: 'MINUTES')
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        script {
+          tracked {
+            checkout scm
+            sh 'rm -rf reports dist'
+          }
+        }
+      }
+    }
+
+    stage('Prepare') {
+      steps {
+        script {
+          tracked {
+            def ports = [dev: env.WEBAPP_PORT_DEV, uat: env.WEBAPP_PORT_UAT, prd: env.WEBAPP_PORT_PRD]
+            if (env.TAG_NAME) {
+              env.ENV_NAME = 'prd'
+              env.TAG      = env.TAG_NAME
+            } else if (env.BRANCH_NAME == 'uat') {
+              env.ENV_NAME = 'uat'
+              env.TAG      = "uat-build-${env.BUILD_NUMBER}"
+            } else if (env.BRANCH_NAME == 'develop') {
+              env.ENV_NAME = 'dev'
+              env.TAG      = "dev-build-${env.BUILD_NUMBER}"
+            } else {
+              // glo-portal ข้าม branch อื่นไปเลย (NOT_BUILT) ที่นี่ให้ผ่าน security gate ก่อน merge
+              env.ENV_NAME = 'ci'
+              env.TAG      = ''
+            }
+            env.DEPLOYABLE    = (env.ENV_NAME != 'ci').toString()
+            env.APP_PREFIX    = "glo-${env.ENV_NAME}"
+            env.CONTAINER     = "${env.APP_PREFIX}-sample-app"
+            env.APP_PORT      = ports[env.ENV_NAME] ?: ''
+            // SonarQube Community วิเคราะห์ได้ทีละ branch ต่อ project จึงแยก project ตาม env แบบของจริง
+            env.SONAR_PROJECT = "workshop-sample-app-${env.ENV_NAME}"
+            env.BUILD_DATE    = sh(script: 'TZ=Asia/Bangkok date "+%Y-%m-%d %H:%M:%S"', returnStdout: true).trim()
+            currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.ENV_NAME}${env.TAG ? ' ' + env.TAG : ''}"
+
+            echo """--- Multibranch Info ---
+  BRANCH_NAME : ${env.BRANCH_NAME ?: '-'}
+  TAG_NAME    : ${env.TAG_NAME ?: '-'}
+  ENV_NAME    : ${env.ENV_NAME}
+  TAG         : ${env.TAG ?: '(ไม่ build image)'}
+  CONTAINER   : ${env.DEPLOYABLE == 'true' ? env.CONTAINER : '-'}
+  APP URL     : ${env.DEPLOYABLE == 'true' ? 'http://' + env.LAB_HOST + ':' + env.APP_PORT : '-'}
+  SONAR_KEY   : ${env.SONAR_PROJECT}
+  BUILD_DATE  : ${env.BUILD_DATE}"""
+          }
+        }
+      }
+    }
+
+    stage('Environment Check') {
+      steps {
+        script {
+          tracked {
+            sh '''#!/bin/bash
+              fail=0
+              check() { if eval "$2" >/dev/null 2>&1; then echo "  [OK]   $1"; else echo "  [FAIL] $1"; fail=1; fi; }
+              echo "--- เครื่องมือใน Jenkins ---"
+              echo "  buildctl $(buildctl --version | awk '{print $3}') · trivy $(trivy --version | awk 'NR==1{print $2}') · helm $(helm version --short) · docker $(docker version --format '{{.Client.Version}}')"
+              echo "--- server ที่ pipeline ต้องใช้ ---"
+              check "Vault unsealed      ${VAULT_ADDR:-http://vault:8200}" 'curl -sf ${VAULT_ADDR:-http://vault:8200}/v1/sys/health'
+              check "SonarQube UP        $SONAR_HOST_URL"  'curl -sf $SONAR_HOST_URL/api/system/status | grep -q "\\"UP\\""'
+              check "Trivy server        $TRIVY_SERVER"    'curl -sf $TRIVY_SERVER/healthz'
+              check "Registry            $IMAGE_REGISTRY"  'curl -sf http://$IMAGE_REGISTRY/v2/'
+              check "BuildKit            $BUILDKIT_HOST"   'buildctl debug workers'
+              check "deploy-host docker  $DOCKER_HOST"     'docker info'
+              [ "$fail" = 0 ] || { echo "มี server ไม่พร้อม หยุดตรงนี้ดีกว่าไปตกกลางทาง"; exit 1; }
+            '''
+          }
+        }
+      }
+    }
+
+    // สาธิตทีละขั้นว่า Jenkins เอา secret มาจาก Vault อย่างไร (A1-A5 ยิง HTTP API เอง, B ผ่าน plugin)
+    // ฝั่ง Vault ดูคู่กันได้: docker compose exec vault sh /workshop/audit-view.sh -f
+    stage('Vault: Jenkins ดึง secret') {
+      steps {
+        script {
+          tracked {
+            withCredentials([usernamePassword(credentialsId: 'vault-approle-cli', usernameVariable: 'ROLE_ID', passwordVariable: 'SECRET_ID')]) {
+              withEnv(["ENV_NAME=${env.DEPLOYABLE == 'true' ? env.ENV_NAME : ''}"]) {
+                sh 'bash ci/vault-demo.sh'
+              }
+            }
+            withVault([vaultSecrets: [[path: 'secret/workshop/demo', secretValues: [
+                [envVar: 'DB_PASSWORD', vaultKey: 'db_password'],
+                [envVar: 'API_KEY', vaultKey: 'api_key']]]]]) {
+              sh '''#!/bin/bash
+                printf '\\n──── B  withVault (plugin) ────\\n'
+                echo "DB_PASSWORD ใน log: $DB_PASSWORD"
+                echo "API_KEY ใน log:     $API_KEY"
+                echo "Jenkins แทนค่าเป็น **** ให้เองเพราะรู้ว่าตัวแปรนี้มาจาก Vault แต่โปรแกรมใน stage ได้ค่าจริงไปใช้:"
+                echo "  DB_PASSWORD ยาว ${#DB_PASSWORD} ตัวอักษร · sha256 $(printf '%s' "$DB_PASSWORD" | sha256sum | cut -c1-12)"
+              '''
+            }
+          }
+        }
+      }
+    }
+
+    stage('Gate 1: SonarQube Quality Gate') {
+      steps {
+        script {
+          tracked {
+            withVault([vaultSecrets: [[path: 'secret/workshop/sonar', secretValues: [[envVar: 'SONAR_TOKEN', vaultKey: 'token']]]]]) {
+              // qualitygate.wait=true ให้ scanner รอผลแล้ว exit 1 เองถ้าไม่ผ่าน
+              sh '''sonar-scanner -Dsonar.host.url="$SONAR_HOST_URL" -Dsonar.token="$SONAR_TOKEN" \
+                      -Dsonar.projectKey="$SONAR_PROJECT" -Dsonar.projectName="Workshop Sample App ($ENV_NAME)" \
+                      -Dsonar.qualitygate.wait=true'''
+            }
+          }
+        }
+      }
+    }
+
+    stage('Gate 2: trivy fs (dependency)') {
+      steps {
+        script {
+          tracked {
+            // สแกนครั้งเดียว ได้ทั้ง report HTML/JSON และผล gate (ดู ci/trivy-gate.sh)
+            sh 'bash ci/trivy-gate.sh trivy-fs HIGH,CRITICAL fs .'
+          }
+        }
+      }
+    }
+
+    stage('Build + Push (BuildKit)') {
+      when { environment name: 'DEPLOYABLE', value: 'true' }
+      steps {
+        script {
+          tracked {
+            sh '''
+              buildctl build \
+                --frontend dockerfile.v0 --local context=. --local dockerfile=. \
+                --output type=image,name="$IMAGE:$TAG",push=true,registry.insecure=true \
+                --export-cache type=registry,ref="$IMAGE:buildcache",registry.insecure=true \
+                --import-cache type=registry,ref="$IMAGE:buildcache",registry.insecure=true
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Gate 3: trivy image') {
+      when { environment name: 'DEPLOYABLE', value: 'true' }
+      steps {
+        script {
+          tracked {
+            // HIGH จาก base image มีหลายสิบตัวที่ทีมแก้เองไม่ได้ gate นี้จึงหยุดเฉพาะ CRITICAL
+            sh 'bash ci/trivy-gate.sh trivy-image CRITICAL image --insecure "$IMAGE:$TAG"'
+          }
+        }
+      }
+    }
+
+    stage('Helm package + push') {
+      when { environment name: 'DEPLOYABLE', value: 'true' }
+      steps {
+        script {
+          tracked {
+            // chart เก็บเข้า registry คู่กับ image ไว้ใช้ตอนย้ายไป deploy บน Kubernetes
+            sh '''
+              helm lint ./chart
+              helm package ./chart --app-version "$TAG" -d dist
+              helm push dist/sample-app-*.tgz "oci://$IMAGE_REGISTRY/charts" --plain-http
+            '''
+          }
+        }
+      }
+    }
+
+    // deploy-host คือ docker daemon แยก (docker:dind) จำลองเครื่อง server ปลายทาง
+    // แต่ละ env เป็น container ของตัวเอง ชื่อ ${APP_PREFIX}-sample-app (เหมือน release glo-dev / glo-uat / glo-prd ของจริง)
+    stage('Deploy') {
+      when {
+        allOf {
+          environment name: 'DEPLOYABLE', value: 'true'
+          expression { params.DEPLOY }
+        }
+      }
+      steps {
+        script {
+          tracked {
+            withCredentials([usernamePassword(credentialsId: 'vault-approle-cli', usernameVariable: 'ROLE_ID', passwordVariable: 'SECRET_ID')]) {
+              sh '''#!/bin/bash
+                set -euo pipefail
+                echo "--- [1/3] secret/$ENV_NAME/app-env จาก Vault ---"
+                bash ci/vault-env.sh "$ENV_NAME/app-env" "$WORKSPACE/.app.env"
+                printf 'APP_ENV=%s\\nAPP_VERSION=%s\\n' "$ENV_NAME" "$TAG" >> "$WORKSPACE/.app.env"
+
+                echo "--- [2/3] pull $IMAGE:$TAG บน $(docker info --format '{{.Name}}') ---"
+                docker pull -q "$IMAGE:$TAG"
+
+                echo "--- [3/3] แทน container $CONTAINER ---"
+                # lab ยอมให้ดับไม่กี่วินาที งานจริงใช้ blue/green หรือ rolling update ของ kube
+                docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+                docker run -d --name "$CONTAINER" --restart unless-stopped \
+                  --label workshop.env="$ENV_NAME" --label workshop.tag="$TAG" \
+                  -p "$APP_PORT:8000" --env-file "$WORKSPACE/.app.env" \
+                  "$IMAGE:$TAG"
+                rm -f "$WORKSPACE/.app.env"
+              '''
+            }
+          }
+        }
+      }
+    }
+
+    stage('Verify App Version') {
+      when {
+        allOf {
+          environment name: 'DEPLOYABLE', value: 'true'
+          expression { params.DEPLOY }
+        }
+      }
+      steps {
+        script {
+          tracked {
+            sh '''#!/bin/bash
+              set -uo pipefail
+              URL="http://deploy-host:$APP_PORT"
+              for i in $(seq 1 12); do
+                v=$(curl -sf "$URL/version" | jq -r .version 2>/dev/null)
+                echo "  [Attempt $i/12] version: ${v:-ยังไม่ตอบ}"
+                if [ "$v" = "$TAG" ]; then break; fi
+                if [ "$i" = 12 ]; then echo "  [FAIL] app ไม่ขึ้น หรือยังเป็นเวอร์ชันเก่า"; docker logs --tail 30 "$CONTAINER"; exit 1; fi
+                sleep 5
+              done
+              curl -sf "$URL/healthz"; echo
+              docker ps --filter label=workshop.env --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'
+              echo "  [OK] เปิดดูได้ที่ http://$LAB_HOST:$APP_PORT"
+            '''
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      sh 'rm -f "$WORKSPACE/.app.env"'
+      // report ขึ้นทุกครั้งแม้ gate ตก: เมนู "Trivy Report" ในหน้า build และไฟล์ JSON ใน Build Artifacts
+      archiveArtifacts artifacts: 'reports/*', allowEmptyArchive: true
+      publishHTML(target: [reportName: 'Trivy Report', reportDir: 'reports',
+                           reportFiles: 'trivy-fs.html,trivy-image.html', reportTitles: 'trivy fs,trivy image',
+                           allowMissing: true, keepAll: true, alwaysLinkToLastBuild: true])
+    }
+    success {
+      script { notify('SUCCESS') }
+    }
+    failure {
+      script { notify('FAILED') }
+    }
+  }
+}

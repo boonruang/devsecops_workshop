@@ -1,0 +1,9 @@
+chart
+dist
+tests
+.scannerwork
+Jenkinsfile
+*.properties
+Jenkinsfile.scripted
+ci
+reports

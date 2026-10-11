@@ -1,0 +1,282 @@
+# DevSecOps Workshop: GitLab · Jenkins · SonarQube · Trivy · BuildKit · Helm · Vault
+# ปลายทาง deploy คือ deploy-host (docker daemon แยก จำลองเครื่อง server) ไม่ต้องมี Kubernetes
+#
+# เตรียมเครื่อง:  bash setup.sh   (Linux: ตรวจเครื่อง, ตั้ง sysctl, โหลด image offline, สร้าง .env)
+# เปิดทั้งชุด:   docker compose --profile all up -d   (เติม --build ถ้าไม่ได้โหลด image offline)
+# เปิดบางส่วน:   docker compose --profile sonar --profile trivy up -d
+# profile:      gitlab · jenkins · sonar · trivy · build · vault · deploy · all
+#
+# Jenkins เปิดคู่กับ build + vault + trivy + sonar เสมอ เพราะ pipeline เรียกใช้ทั้งหมด
+
+name: devsecops_workshop
+
+services:
+  # ───────────── GitLab ─────────────
+  gitlab:
+    restart: unless-stopped
+    image: gitlab/gitlab-ce:19.4.1-ce.0
+    container_name: gitlab
+    hostname: gitlab
+    profiles: [gitlab, all]
+    shm_size: 256m
+    ports:
+      - "${GITLAB_HTTP_PORT:-8929}:${GITLAB_HTTP_PORT:-8929}"
+      - "${GITLAB_SSH_PORT:-2224}:22"
+    environment:
+      # ใช้ตอน GitLab เปิดครั้งแรก (volume ว่าง) เท่านั้น หลังจากนั้นเปลี่ยนรหัสในหน้าเว็บแล้วค่านี้ไม่มีผล
+      GITLAB_ROOT_PASSWORD: ${GITLAB_ROOT_PASSWORD:?ตั้ง GITLAB_ROOT_PASSWORD ใน .env}
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://${LAB_HOST}:${GITLAB_HTTP_PORT:-8929}'
+        gitlab_rails['gitlab_shell_ssh_port'] = ${GITLAB_SSH_PORT:-2224}
+        # การอนุญาตให้ webhook ยิงเข้าเครือข่ายภายในตั้งใน gitlab.rb ไม่ได้ (เป็นค่าในฐานข้อมูล)
+        # ผู้เรียนเปิดเองใน Admin > Settings > Network ตาม README ขั้นที่ 4
+        puma['worker_processes'] = 2
+        sidekiq['concurrency'] = 10
+        prometheus_monitoring['enable'] = false
+        gitlab_kas['enable'] = false
+        registry['enable'] = false
+    volumes:
+      - gitlab-config:/etc/gitlab
+      - gitlab-logs:/var/log/gitlab
+      - gitlab-data:/var/opt/gitlab
+    healthcheck:
+      # ไม่ใช้ gitlab-healthcheck ของ image เพราะมันตอบ healthy ระหว่าง reconfigure รอบแรกทั้งที่เว็บยังไม่ขึ้น
+      test: ["CMD-SHELL", "curl -fsS -m 10 http://localhost:${GITLAB_HTTP_PORT:-8929}/-/readiness || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 300s
+
+  # ───────────── Jenkins ─────────────
+  jenkins:
+    restart: unless-stopped
+    build: ./jenkins
+    image: devsecops_workshop/jenkins:2.580.1-lts-jdk21
+    container_name: jenkins
+    profiles: [jenkins, all]
+    depends_on:
+      vault:
+        condition: service_healthy
+      buildkitd:
+        condition: service_started
+      trivy-server:
+        condition: service_started
+      deploy-host:
+        condition: service_healthy
+    ports:
+      - "${JENKINS_HTTP_PORT:-8080}:8080"
+    environment:
+      # CSP ว่าง = ให้ report HTML ของ Trivy (มี inline style/script) แสดงผลได้ ใช้เฉพาะ lab
+      JAVA_OPTS: -Djenkins.install.runSetupWizard=false -Dhudson.model.DirectoryBrowserSupport.CSP=
+      CASC_JENKINS_CONFIG: /var/jenkins_home/casc/jenkins.yaml
+      LAB_HOST: ${LAB_HOST}
+      JENKINS_HTTP_PORT: ${JENKINS_HTTP_PORT:-8080}
+      JENKINS_ADMIN_ID: ${JENKINS_ADMIN_ID:-admin}
+      JENKINS_ADMIN_PASSWORD: ${JENKINS_ADMIN_PASSWORD:?ตั้ง JENKINS_ADMIN_PASSWORD ใน .env}
+      VAULT_JENKINS_ROLE_ID: ${VAULT_JENKINS_ROLE_ID}
+      VAULT_JENKINS_SECRET_ID: ${VAULT_JENKINS_SECRET_ID}
+      # ค่าที่ pipeline ใช้ ประกาศไว้ที่เดียว
+      BUILDKIT_HOST: tcp://buildkitd:1234
+      TRIVY_SERVER: http://trivy-server:4954
+      SONAR_HOST_URL: http://sonarqube:9000
+      IMAGE_REGISTRY: ${LAB_HOST}:${REGISTRY_PORT:-5000}
+      # docker CLI ใน Jenkins สั่งงาน docker daemon ของ deploy-host ไม่ใช่ของเครื่องจริง
+      DOCKER_HOST: tcp://deploy-host:2375
+      # พอร์ตของ app แต่ละ env บน deploy-host (multibranch: develop=dev, uat=uat, tag=prd)
+      WEBAPP_PORT_DEV: ${WEBAPP_PORT_DEV:-8088}
+      WEBAPP_PORT_UAT: ${WEBAPP_PORT_UAT:-8089}
+      WEBAPP_PORT_PRD: ${WEBAPP_PORT_PRD:-8090}
+    volumes:
+      - jenkins-home:/var/jenkins_home
+      - ./jenkins/casc:/var/jenkins_home/casc:ro
+
+  # ───────────── SonarQube ─────────────
+  # ต้องตั้ง vm.max_map_count=524288 บน host ก่อน (ดู README)
+  sonarqube:
+    restart: unless-stopped
+    image: sonarqube:26.9.0.129388-community
+    container_name: sonarqube
+    profiles: [sonar, jenkins, all]
+    depends_on:
+      sonar-db:
+        condition: service_healthy
+    ports:
+      - "${SONAR_HTTP_PORT:-9000}:9000"
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonar
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: ${SONAR_DB_PASSWORD:-sonar-change-me}
+    volumes:
+      - sonar-data:/opt/sonarqube/data
+      - sonar-extensions:/opt/sonarqube/extensions
+      - sonar-logs:/opt/sonarqube/logs
+    ulimits:
+      nofile: { soft: 131072, hard: 131072 }
+      nproc: 8192
+
+  sonar-db:
+    restart: unless-stopped
+    image: postgres:17.11-alpine
+    container_name: sonar-db
+    profiles: [sonar, jenkins, all]
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: ${SONAR_DB_PASSWORD:-sonar-change-me}
+      POSTGRES_DB: sonar
+    volumes:
+      - sonar-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonar"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ───────────── Trivy ─────────────
+  # server ถือฐานข้อมูลช่องโหว่ไว้กลาง client (ใน Jenkins หรือ compose run) ไม่ต้องโหลดซ้ำ
+  trivy-server:
+    restart: unless-stopped
+    image: aquasec/trivy:0.75.0
+    container_name: trivy-server
+    profiles: [trivy, jenkins, all]
+    command: ["server", "--listen", "0.0.0.0:4954", "--cache-dir", "/root/.cache/trivy"]
+    ports:
+      - "${TRIVY_SERVER_PORT:-4954}:4954"
+    volumes:
+      - trivy-cache:/root/.cache/trivy
+
+  # ───────────── BuildKit + registry ─────────────
+  buildkitd:
+    restart: unless-stopped
+    image: moby/buildkit:v0.33.1
+    container_name: buildkitd
+    profiles: [build, jenkins, all]
+    privileged: true
+    command: ["--addr", "tcp://0.0.0.0:1234", "--addr", "unix:///run/buildkit/buildkitd.sock"]
+    volumes:
+      - buildkit-state:/var/lib/buildkit
+
+  # ที่เก็บ image กับ Helm chart (deploy-host pull image ผ่าน LAB_HOST:5000)
+  registry:
+    restart: unless-stopped
+    image: registry:3.1.2
+    container_name: workshop-registry
+    profiles: [build, jenkins, all]
+    ports:
+      - "${REGISTRY_PORT:-5000}:5000"
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    volumes:
+      - registry-data:/var/lib/registry
+
+  # ───────────── Deploy host ─────────────
+  # จำลองเครื่อง server ปลายทางที่ app ไปรันจริง (แทน Kubernetes)
+  # เป็น docker daemon แยกของตัวเอง (docker:dind) Jenkins สั่งผ่าน tcp://deploy-host:2375
+  # Jenkins ไม่ได้แตะ docker socket ของเครื่อง host เลย ลบ container ทิ้งได้โดยไม่กระทบอย่างอื่น
+  deploy-host:
+    restart: unless-stopped
+    image: docker:29.8.2-dind
+    container_name: deploy-host
+    hostname: deploy-host
+    profiles: [deploy, jenkins, all]
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""        # เปิด 2375 แบบไม่มี TLS ใช้ได้เฉพาะในเครือข่าย lab
+    # --bip: docker0 ข้างใน deploy-host ปกติใช้วง 172.17.0.0/16 ถ้า LAB_HOST อยู่ในวงนั้น (เครือข่ายลูกค้าบางที่ใช้ 172.17.x)
+    # deploy-host จะคิดว่า LAB_HOST อยู่ในวงตัวเอง แล้ว pull image จาก LAB_HOST:5000 ไม่ได้ (no route to host)
+    # จึงย้ายไปวง /24 ที่แทบไม่มีใครใช้ ถ้าชนอีก เปลี่ยนที่ DEPLOY_HOST_BIP ใน .env
+    command: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock", "--insecure-registry=${LAB_HOST}:${REGISTRY_PORT:-5000}", "--bip=${DEPLOY_HOST_BIP:-172.31.255.1/24}"]
+    ports:
+      # web app ที่ deploy แล้วแยกตาม env (2375 ไม่เปิดออกนอก)
+      - "${WEBAPP_PORT_DEV:-8088}:${WEBAPP_PORT_DEV:-8088}"   # dev  (branch develop)
+      - "${WEBAPP_PORT_UAT:-8089}:${WEBAPP_PORT_UAT:-8089}"   # uat  (branch uat)
+      - "${WEBAPP_PORT_PRD:-8090}:${WEBAPP_PORT_PRD:-8090}"   # prd  (git tag)
+    volumes:
+      - deploy-host-data:/var/lib/docker
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # ───────────── Vault ─────────────
+  # container เดียวจบ: server mode + file storage, unseal เอง, แล้วรัน init.sh (policy, AppRole, audit, secret ตั้งต้น)
+  # healthy = unseal แล้วและ init เสร็จแล้ว (ดู vault/entrypoint.sh)
+  vault:
+    restart: unless-stopped
+    image: hashicorp/vault:2.1.1
+    container_name: vault
+    profiles: [vault, jenkins, all]
+    entrypoint: ["/bin/sh", "/workshop/entrypoint.sh"]
+    ports:
+      - "${VAULT_PORT:-8200}:8200"
+    environment:
+      VAULT_ROOT_TOKEN: ${VAULT_ROOT_TOKEN:?ตั้ง VAULT_ROOT_TOKEN ใน .env}
+      VAULT_JENKINS_ROLE_ID: ${VAULT_JENKINS_ROLE_ID:?ตั้ง VAULT_JENKINS_ROLE_ID ใน .env}
+      VAULT_JENKINS_SECRET_ID: ${VAULT_JENKINS_SECRET_ID:?ตั้ง VAULT_JENKINS_SECRET_ID ใน .env}
+      # ให้ docker compose exec vault vault ... ใช้ได้ทันที ไม่ต้องตั้งเอง
+      VAULT_ADDR: http://127.0.0.1:8200
+    volumes:
+      - ./vault:/workshop:ro
+      - vault-data:/vault/file
+      - vault-logs:/vault/logs
+    healthcheck:
+      test: ["CMD-SHELL", "vault status >/dev/null && test -f /tmp/workshop-ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  # ───────────── CLI แบบรันครั้งเดียว (docker compose run --rm <ชื่อ> ...) ─────────────
+  trivy:
+    image: aquasec/trivy:0.75.0
+    profiles: [cli]
+    volumes:
+      - ./sample-app:/src:ro
+      - trivy-client-cache:/root/.cache/trivy
+
+  buildctl:
+    image: moby/buildkit:v0.33.1
+    profiles: [cli]
+    entrypoint: ["buildctl"]
+    environment:
+      BUILDKIT_HOST: tcp://buildkitd:1234
+    volumes:
+      - ./sample-app:/src:ro
+
+  helm:
+    image: alpine/helm:3.22.0
+    profiles: [cli]
+    working_dir: /work
+    volumes:
+      - ./sample-app:/work
+
+  sonar-scanner:
+    image: sonarsource/sonar-scanner-cli:12.2.0.4256_8.1.0
+    profiles: [cli]
+    environment:
+      SONAR_HOST_URL: http://sonarqube:9000
+      SONAR_TOKEN: ${SONAR_TOKEN:-}
+    volumes:
+      - ./sample-app:/usr/src
+
+volumes:
+  gitlab-config:
+  gitlab-logs:
+  gitlab-data:
+  jenkins-home:
+  sonar-data:
+  sonar-extensions:
+  sonar-logs:
+  sonar-db:
+  trivy-cache:
+  trivy-client-cache:
+  buildkit-state:
+  registry-data:
+  vault-data:
+  vault-logs:
+  deploy-host-data:
+
+networks:
+  default:
+    name: devsecops_workshop

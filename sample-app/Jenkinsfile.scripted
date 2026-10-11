@@ -1,0 +1,152 @@
+// Scripted Pipeline: เขียนเป็น Groovy ทั้งไฟล์ คุม flow เองได้ทั้งหมด (ตัวแปร, if, function, try/catch, parallel)
+// ทำงานเหมือน Jenkinsfile (declarative) แต่ล็อกไว้ที่ branch develop และ deploy ทับ env dev (container glo-dev-sample-app)
+// pipeline หลักคือ multibranch job sample-app ไฟล์นี้มีไว้ฝึกเขียน Groovy
+//
+// ใช้ได้สองแบบ:
+//   1) job ชนิด Pipeline > Definition: "Pipeline script" แล้ววางทั้งไฟล์นี้ลงไป แก้ script ในหน้า Jenkins ได้เลย
+//   2) Definition: "Pipeline script from SCM" แล้วตั้ง Script Path เป็น Jenkinsfile.scripted
+// ทั้งสองแบบ clone repo เองด้วย step git (แบบ 1 ไม่มีตัวแปร scm ให้ใช้)
+
+properties([
+  parameters([
+    booleanParam(name: 'DEPLOY', defaultValue: true, description: 'deploy ทับ env dev (http://LAB_HOST:8088) หลังผ่านทุก gate'),
+    choice(name: 'TRIVY_FS_SEVERITY', choices: ['HIGH,CRITICAL', 'CRITICAL'], description: 'ระดับที่ทำให้ Gate 2 (trivy fs) ตก'),
+  ])
+])
+
+def repoUrl = 'http://gitlab:8929/root/sample-app.git'
+def results = []   // ผลของแต่ละ gate ไว้สรุปท้าย build
+
+// function ของเราเอง: รัน gate แล้วจดผลไว้ ถ้าตกก็โยน error ต่อให้ build ตก
+def gate(List results, String name, Closure body) {
+  try {
+    body()
+    results << "PASS  ${name}"
+  } catch (err) {
+    results << "FAIL  ${name}"
+    throw err
+  }
+}
+
+node {
+  // build แรกของ job ยังไม่มี params (properties เพิ่งถูกตั้ง) จึงต้องมีค่า default สำรอง
+  def tag = "scripted-build-${env.BUILD_NUMBER}"
+  def container = 'glo-dev-sample-app'
+  def deploy = (params.DEPLOY == null) ? true : params.DEPLOY
+  def fsSeverity = params.TRIVY_FS_SEVERITY ?: 'HIGH,CRITICAL'
+
+  withEnv(["IMAGE=${env.IMAGE_REGISTRY}/workshop/sample-app", "IMAGE_TAG=${tag}"]) {
+    timestamps {
+      try {
+        stage('Checkout') {
+          git url: repoUrl, credentialsId: 'gitlab', branch: 'develop'
+          sh 'rm -rf reports'
+          def commit = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          currentBuild.description = "commit ${commit} · tag ${tag}"
+          echo "commit ${commit}  tag ${tag}  deploy ${deploy}  trivy fs ตกที่ ${fsSeverity}"
+        }
+
+        stage('Vault: Jenkins ดึง secret') {
+          withCredentials([usernamePassword(credentialsId: 'vault-approle-cli', usernameVariable: 'ROLE_ID', passwordVariable: 'SECRET_ID')]) {
+            sh 'bash ci/vault-demo.sh'
+          }
+        }
+
+        // Gate 1 กับ Gate 2 ไม่ได้ขึ้นต่อกัน สั่งให้รันพร้อมกันได้ (declarative ก็ทำได้ แต่ scripted เห็นชัดกว่า)
+        stage('Gate 1 + 2 (parallel)') {
+          parallel(
+            'Gate 1: SonarQube': {
+              gate(results, 'Gate 1 SonarQube Quality Gate') {
+                withVault([vaultSecrets: [[path: 'secret/workshop/sonar', secretValues: [[envVar: 'SONAR_TOKEN', vaultKey: 'token']]]]]) {
+                  sh 'sonar-scanner -Dsonar.host.url="$SONAR_HOST_URL" -Dsonar.token="$SONAR_TOKEN" -Dsonar.qualitygate.wait=true'
+                }
+              }
+            },
+            'Gate 2: trivy fs': {
+              gate(results, "Gate 2 trivy fs (${fsSeverity})") {
+                sh "bash ci/trivy-gate.sh trivy-fs ${fsSeverity} fs ."
+              }
+            },
+            failFast: false   // ให้ทั้งสอง gate รันจนจบ ผู้เรียนเห็นผลครบในรอบเดียว
+          )
+        }
+
+        stage('Build + Push (BuildKit)') {
+          sh '''
+            buildctl build \
+              --frontend dockerfile.v0 --local context=. --local dockerfile=. \
+              --output type=image,name="$IMAGE:$IMAGE_TAG",push=true,registry.insecure=true \
+              --export-cache type=registry,ref="$IMAGE:buildcache",registry.insecure=true \
+              --import-cache type=registry,ref="$IMAGE:buildcache",registry.insecure=true
+          '''
+        }
+
+        stage('Gate 3: trivy image') {
+          gate(results, 'Gate 3 trivy image (CRITICAL)') {
+            sh 'bash ci/trivy-gate.sh trivy-image CRITICAL image --insecure "$IMAGE:$IMAGE_TAG"'
+          }
+        }
+
+        stage('Helm package + push') {
+          sh '''
+            helm lint ./chart
+            helm package ./chart --app-version "$IMAGE_TAG" -d dist
+            helm push dist/sample-app-*.tgz "oci://$IMAGE_REGISTRY/charts" --plain-http
+          '''
+        }
+
+        // scripted ใช้ if ธรรมดาแทน when { }
+        if (deploy) {
+          stage('Deploy (Docker container)') {
+            withCredentials([usernamePassword(credentialsId: 'vault-approle-cli', usernameVariable: 'ROLE_ID', passwordVariable: 'SECRET_ID')]) {
+              withEnv(["CONTAINER=${container}"]) {
+                sh '''#!/bin/bash
+                  set -euo pipefail
+                  bash ci/vault-env.sh dev/app-env "$WORKSPACE/.app.env"
+                  printf 'APP_ENV=dev\\nAPP_VERSION=%s\\n' "$IMAGE_TAG" >> "$WORKSPACE/.app.env"
+                  docker pull -q "$IMAGE:$IMAGE_TAG"
+                  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+                  docker run -d --name "$CONTAINER" --restart unless-stopped \
+                    --label workshop.env=dev --label workshop.tag="$IMAGE_TAG" \
+                    -p "$WEBAPP_PORT_DEV:8000" --env-file "$WORKSPACE/.app.env" \
+                    "$IMAGE:$IMAGE_TAG"
+                  rm -f "$WORKSPACE/.app.env"
+                '''
+              }
+            }
+          }
+
+          stage('Verify App') {
+            // retry + sleep ของ Jenkins แทน loop ใน shell
+            retry(12) {
+              sleep(time: 5, unit: 'SECONDS')
+              def v = sh(script: 'curl -sf "http://deploy-host:$WEBAPP_PORT_DEV/version" | jq -r .version', returnStdout: true).trim()
+              echo "version ที่ตอบกลับ: ${v}"
+              if (v != tag) {
+                error("ยังเป็นเวอร์ชัน ${v} ไม่ใช่ ${tag}")
+              }
+            }
+            sh 'docker ps --filter label=workshop.env --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}"'
+            echo "เปิดดูได้ที่ http://${env.LAB_HOST}:${env.WEBAPP_PORT_DEV}"
+          }
+        } else {
+          echo 'DEPLOY = false ข้าม deploy'
+        }
+
+        currentBuild.result = 'SUCCESS'
+      } catch (err) {
+        currentBuild.result = 'FAILURE'
+        echo "build ตก: ${err.getMessage()}"
+        throw err
+      } finally {
+        // finally รันเสมอ เทียบได้กับ post { always { } } ของ declarative
+        sh 'rm -f "$WORKSPACE/.app.env"'
+        archiveArtifacts artifacts: 'reports/*', allowEmptyArchive: true
+        publishHTML(target: [reportName: 'Trivy Report', reportDir: 'reports',
+                             reportFiles: 'trivy-fs.html,trivy-image.html', reportTitles: 'trivy fs,trivy image',
+                             allowMissing: true, keepAll: true, alwaysLinkToLastBuild: true])
+        echo "สรุป gate\n" + (results ? results.join('\n') : '(ยังไม่ถึง gate)')
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+.env
+sample-app/dist/
+sample-app/.scannerwork/
+.workshop-credentials.txt
+reports/
+images/
+__pycache__/

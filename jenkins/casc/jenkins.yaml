@@ -1,0 +1,57 @@
+# Jenkins Configuration as Code: ตั้งค่าทั้งหมดจากไฟล์นี้ตอนเปิด ไม่มีหน้า setup wizard
+# แก้ไฟล์แล้ว reload ได้ที่ Manage Jenkins > Configuration as Code > Reload existing configuration
+jenkins:
+  systemMessage: "DevSecOps Workshop · secret ทุกตัวอยู่ใน Vault"
+  numExecutors: 2
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_ID}"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+unclassified:
+  location:
+    url: "http://${LAB_HOST}:${JENKINS_HTTP_PORT}/"
+  hashicorpVault:
+    configuration:
+      vaultUrl: "http://vault:8200"
+      vaultCredentialId: "vault-approle"
+      engineVersion: 2
+      timeout: 60
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          # Jenkins login เข้า Vault ด้วย AppRole ได้สิทธิ์อ่าน secret/workshop/* อย่างเดียว
+          - vaultAppRoleCredential:
+              id: "vault-approle"
+              description: "Vault AppRole ของ Jenkins"
+              path: "approle"
+              roleId: "${VAULT_JENKINS_ROLE_ID}"
+              secretId: "${VAULT_JENKINS_SECRET_ID}"
+              scope: GLOBAL
+          # credential ของ GitLab ไม่ได้เก็บใน Jenkins: ทุกครั้งที่ใช้ Jenkins ไปอ่านจาก Vault ที่ secret/workshop/gitlab
+          # ⚠️ JCasC เขียนทับ credential ของระบบทั้งชุดตอน Jenkins เปิด credential ที่เพิ่มผ่านหน้าเว็บจะหายหลัง restart
+          #    credential ที่ต้องอยู่ถาวรจึงต้องประกาศในไฟล์นี้ และให้ค่าจริงอยู่ใน Vault
+          - vaultUsernamePasswordCredentialImpl:
+              id: "gitlab"
+              description: "GitLab (ค่าจริงอยู่ใน Vault: secret/workshop/gitlab)"
+              path: "secret/workshop/gitlab"
+              usernameKey: "username"
+              passwordKey: "password"
+              engineVersion: 2
+              scope: GLOBAL
+          # AppRole ชุดเดียวกัน ในรูป username/password ให้ stage สาธิตเรียก Vault HTTP API เองได้
+          # (username = role_id, password = secret_id) Jenkins ปิดค่าเป็น **** ใน log ให้อัตโนมัติ
+          - usernamePassword:
+              id: "vault-approle-cli"
+              description: "Vault AppRole (role_id / secret_id) สำหรับ stage สาธิต"
+              username: "${VAULT_JENKINS_ROLE_ID}"
+              usernameSecret: true
+              password: "${VAULT_JENKINS_SECRET_ID}"
+              scope: GLOBAL
