@@ -33,6 +33,7 @@ GitLab --webhook (push / tag)--> Jenkins multibranch "sample-app"
 | Jenkins | `http://LAB_HOST:8080` | `JENKINS_ADMIN_ID` / `JENKINS_ADMIN_PASSWORD` ใน `.env` |
 | SonarQube | `http://LAB_HOST:9000` | ครั้งแรก `admin` / `admin` ระบบบังคับเปลี่ยน แล้วจดรหัสใหม่ไว้ที่ `SONAR_ADMIN_PASSWORD` ใน `.env` |
 | Vault | `http://LAB_HOST:8200` | Token = `VAULT_ROOT_TOKEN` ใน `.env` |
+| Harbor (profile `harbor` เปิดแยก) | `http://LAB_HOST:8085` | `admin` / `HARBOR_ADMIN_PASSWORD` ใน `.env` |
 | Trivy server | `http://LAB_HOST:4954` | ไม่มีหน้าเว็บ report ดูในหน้า build ของ Jenkins เมนู **Trivy Report** |
 | Registry | `http://LAB_HOST:5000/v2/_catalog` | เปิดโล่ง ไม่มีรหัส (เฉพาะ lab) |
 | BuildKit | ไม่เปิดพอร์ตออกนอก | Jenkins เรียกผ่าน `tcp://buildkitd:1234` |
@@ -81,7 +82,7 @@ Docker Desktop บน Windows ใช้ได้เหมือนกัน แ�
 Docker Hub ให้ pull แบบไม่ login ได้ **100 ครั้งต่อชั่วโมงต่อ IP ขาออก** (วัดจาก header `ratelimit-limit: 100;w=3600`)
 ห้องอบรมที่ทุกเครื่องออกเน็ตผ่าน IP เดียวกัน ใช้เครื่องละ ~10 image แค่ 10 เครื่องก็ชนเพดานแล้ว และ Jenkins ต้อง build เอง (โหลด plugin จาก internet)
 
-บนเครื่องที่ up ระบบได้แล้ว รัน `bash save-images.sh` ได้ `images/*.tar.gz` หนึ่งไฟล์ต่อ image (9 ไฟล์ รวม ~3.5 GB นับ Jenkins ที่ build แล้วด้วย) พร้อม `SHA256SUMS`
+บนเครื่องที่ up ระบบได้แล้ว รัน `bash save-images.sh` ได้ `images/*.tar.gz` หนึ่งไฟล์ต่อ image (20 ไฟล์ รวม ~4.2 GB นับ Jenkins ที่ build แล้วและ Harbor ด้วย) พร้อม `SHA256SUMS`
 แจกผ่าน USB หรือ file share ผู้เรียนวางในโฟลเดอร์ `images/` แล้วรัน `bash setup.sh`
 
 ### เครือข่ายของลูกค้า: ปลายทางที่ lab ต้องออกไปถึง
@@ -111,7 +112,7 @@ Docker Hub ให้ pull แบบไม่ login ได้ **100 ครั้�
 
 ครั้งแรก GitLab ใช้เวลาประมาณ 3-5 นาทีกว่าจะเข้าเว็บได้ รอจนกว่า `docker compose --profile all ps` จะขึ้น `gitlab ... (healthy)`
 
-เปิดเฉพาะบางส่วนได้ด้วย profile: `gitlab` · `jenkins` · `sonar` · `trivy` · `build` · `vault` · `deploy`
+เปิดเฉพาะบางส่วนได้ด้วย profile: `gitlab` · `jenkins` · `sonar` · `trivy` · `build` · `vault` · `deploy` · `harbor` (Harbor ไม่รวมใน `all`)
 (profile `jenkins` จะเปิด sonar, trivy, buildkit, registry, vault, deploy-host ไปด้วย เพราะ pipeline ต้องใช้ครบ)
 
 ## ปลายทาง deploy: deploy-host
@@ -245,11 +246,11 @@ HIGH ส่วนใหญ่มาจาก base image `python:3.12-slim` ท�
 report จะเปิดได้เพราะ compose ตั้ง `-Dhudson.model.DirectoryBrowserSupport.CSP=` ให้ Jenkins แล้ว
 (report มี inline style/script ค่านี้ใช้เฉพาะ lab งานจริงให้ตั้ง Resource Root URL ของ Jenkins แทน)
 
-สแกนเองแล้วได้ report HTML นอก Jenkins:
+สแกนเองนอก pipeline แล้วได้ report HTML (คำสั่ง trivy อยู่ใน Jenkins เท่านั้น ไม่มี container trivy แยก):
 ```bash
-docker compose run --rm -v ./reports:/out trivy image --server http://trivy-server:4954 --insecure \
-  --format template --template @/contrib/html.tpl -o /out/trivy-report.html LAB_HOST:5000/workshop/sample-app:1.0.0
-# ไฟล์อยู่ที่ reports/trivy-report.html ข้าง docker-compose.yml (/src ถูก mount แบบอ่านอย่างเดียว)
+docker compose exec jenkins trivy image --server http://trivy-server:4954 --insecure \
+  --format template --template @/opt/trivy/html.tpl -o /tmp/trivy-report.html LAB_HOST:5000/workshop/sample-app:v1.0.0
+docker compose cp jenkins:/tmp/trivy-report.html ./trivy-report.html
 ```
 
 ## Jenkins แบบ Scripted Pipeline
@@ -331,20 +332,55 @@ docker compose exec -e VAULT_TOKEN=<VAULT_ROOT_TOKEN> vault \
 ข้อจำกัดที่ควรบอกผู้เรียน: คนที่เข้าถึง deploy-host ได้ยังเห็นค่าผ่าน `docker inspect glo-dev-sample-app`
 งานจริงจึงให้ app ไปอ่าน Vault เอง (Vault Agent) หรือใช้ secret ของ orchestrator แทน env
 
+## สาธิต Harbor (เปิดแยกด้วย profile harbor)
+
+Harbor v2.14.2 (9 container ตามแบบติดตั้งมาตรฐาน) แยกจาก registry ที่ pipeline ใช้ เปิดเฉพาะตอนสาธิต:
+
+```bash
+bash harbor/prepare.sh                     # setup.sh เรียกให้แล้ว ต้องรันใหม่เมื่อเปลี่ยน LAB_HOST
+docker compose --profile harbor up -d      # ประมาณ 1 นาที (RAM เพิ่ม ~1 GB)
+```
+
+เปิด `http://LAB_HOST:8085` login `admin` / `HARBOR_ADMIN_PASSWORD` ใน `.env` แล้วทำตามนี้
+
+| ขั้น | ทำอะไร | เห็นอะไร |
+|---|---|---|
+| 1 | Projects > New Project ชื่อ `workshop` > เข้า project > Configuration ติ๊ก **Automatically scan images on push** | |
+| 2 | push image จาก deploy-host (คำสั่งด้านล่าง) | Repositories มี `sample-app` คอลัมน์ Vulnerabilities ขึ้นผลสแกนเองภายในไม่กี่นาที (ทดสอบได้ High 44) |
+| 3 | Configuration ติ๊ก **Prevent vulnerable images from running** เลือก High แล้ว pull ซ้ำ | pull ไม่ได้ `412 Precondition Failed` image ที่มีช่องโหว่ถูกกันไว้ที่ registry |
+| 4 | Robot Accounts > New Robot Account สิทธิ์ push/pull เฉพาะ project นี้ | รหัสของ robot เอาไปเก็บใน Vault แทนรหัส admin (โจทย์ต่อยอด) |
+
+```bash
+docker compose exec deploy-host sh
+# ข้างใน deploy-host (ตั้ง --insecure-registry ของ Harbor ไว้แล้ว)
+docker login LAB_HOST:8085 -u admin
+docker tag LAB_HOST:5000/workshop/sample-app:v1.0.0 LAB_HOST:8085/workshop/sample-app:v1.0.0
+docker push LAB_HOST:8085/workshop/sample-app:v1.0.0
+docker image rm LAB_HOST:8085/workshop/sample-app:v1.0.0 && docker pull LAB_HOST:8085/workshop/sample-app:v1.0.0   # ขั้น 3
+```
+
+ประเด็นคุยในห้อง: ติดตั้ง Harbor ด้วย `install.sh` โดยไม่ใส่ `--with-trivy` จะไม่มี container `trivy-adapter`
+image ที่ push เข้าไปจะไม่ถูกสแกนเลยถ้าไม่ได้ต่อ scanner อื่น ให้ผู้เรียนเช็ค Harbor ขององค์กรตัวเองที่ Administration > Interrogation Services
+
+ต่างจาก Harbor ที่ติดตั้งด้วย `install.sh`:
+- **ใช้ http พอร์ต 8085** ไม่มี cert
+- **เก็บข้อมูลใน named volume แทน `/data`** มี `harbor-volume-init` คอย chown ให้ uid 10000
+- **ไม่มี `harbor-log`** ดู log ด้วย `docker compose logs harbor-core`
+
 ## ใช้เครื่องมือด้วยมือ (นอก Jenkins)
 
 ```bash
-# Trivy: สแกนซอร์ส / สแกน image ใน registry
-docker compose run --rm trivy fs --server http://trivy-server:4954 --severity HIGH,CRITICAL /src
-docker compose run --rm trivy image --server http://trivy-server:4954 --insecure LAB_HOST:5000/workshop/sample-app:1.0.0
+# Trivy: คำสั่งอยู่ใน Jenkins เท่านั้น (ไม่มี container trivy แยก) สแกน image ใน registry ด้วยมือผ่าน container jenkins
+docker compose exec jenkins trivy image --server http://trivy-server:4954 --insecure --severity HIGH,CRITICAL LAB_HOST:5000/workshop/sample-app:v1.0.0
 
 # BuildKit: build แล้ว push (รันซ้ำรอบสองจะเห็น cache ทำให้เร็วขึ้น)
 docker compose run --rm buildctl build --frontend dockerfile.v0 --local context=/src --local dockerfile=/src \
   --output type=image,name=registry:5000/workshop/sample-app:dev,push=true,registry.insecure=true
 
-# Helm: ตรวจและแพ็ก chart
-docker compose run --rm helm lint ./chart
-docker compose run --rm helm template demo ./chart --set image.tag=1.0.0
+# Helm ไม่มี container: chart คือไฟล์ source ใน sample-app/chart ที่อยู่ใน repo GitLab เดียวกับโค้ด
+# pipeline ตรวจด้วย helm lint (คำสั่ง helm อยู่ใน image ของ Jenkins) ถ้ามี helm ในเครื่องก็ลองเองได้
+helm lint sample-app/chart
+helm template demo sample-app/chart --set image.tag=1.0.0
 
 # SonarQube: สแกนจากเครื่องโดยไม่ผ่าน Jenkins
 SONAR_TOKEN=<token> docker compose run --rm sonar-scanner
@@ -392,7 +428,8 @@ docker compose --profile all down -v     # หยุดและล้างข�
 | SonarQube Community | `sonarqube:26.9.0.129388-community` + `postgres:17.11-alpine` |
 | Trivy | `aquasec/trivy:0.75.0` |
 | BuildKit | `moby/buildkit:v0.33.1` |
-| Helm | `alpine/helm:3.22.0` |
+| Helm (คำสั่งใน image ของ Jenkins ไม่มี container) | `3.22.0` (คัดลอกจาก `alpine/helm:3.22.0` ตอน build) |
 | Vault | `hashicorp/vault:2.1.1` |
+| Harbor | `goharbor/*:v2.14.2` |
 | Registry | `registry:3.1.2` |
 | deploy-host | `docker:29.8.2-dind` (docker CLI ใน Jenkins: `docker:29.8.2-cli`) |

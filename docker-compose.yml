@@ -1,10 +1,11 @@
-# DevSecOps Workshop: GitLab · Jenkins · SonarQube · Trivy · BuildKit · Helm · Vault
+# DevSecOps Workshop: GitLab · Jenkins · SonarQube · Trivy · BuildKit · Vault · Harbor
+# Helm ไม่มี container: chart เป็น source อยู่ใน sample-app/chart (เก็บใน GitLab) ส่วนคำสั่ง helm อยู่ใน image ของ Jenkins
 # ปลายทาง deploy คือ deploy-host (docker daemon แยก จำลองเครื่อง server) ไม่ต้องมี Kubernetes
 #
 # เตรียมเครื่อง:  bash setup.sh   (Linux: ตรวจเครื่อง, ตั้ง sysctl, โหลด image offline, สร้าง .env)
 # เปิดทั้งชุด:   docker compose --profile all up -d   (เติม --build ถ้าไม่ได้โหลด image offline)
 # เปิดบางส่วน:   docker compose --profile sonar --profile trivy up -d
-# profile:      gitlab · jenkins · sonar · trivy · build · vault · deploy · all
+# profile:      gitlab · jenkins · sonar · trivy · build · vault · deploy · all · harbor (แยก ไม่รวมใน all)
 #
 # Jenkins เปิดคู่กับ build + vault + trivy + sonar เสมอ เพราะ pipeline เรียกใช้ทั้งหมด
 
@@ -132,7 +133,8 @@ services:
       retries: 20
 
   # ───────────── Trivy ─────────────
-  # server ถือฐานข้อมูลช่องโหว่ไว้กลาง client (ใน Jenkins หรือ compose run) ไม่ต้องโหลดซ้ำ
+  # server ถือฐานข้อมูลช่องโหว่ไว้กลาง ส่วนคำสั่ง trivy อยู่ใน image ของ Jenkins เท่านั้น (ไม่มี container trivy แยก)
+  # pipeline เรียก trivy ... --server $TRIVY_SERVER ทุก build จึงไม่ต้องโหลดฐานข้อมูลซ้ำ
   trivy-server:
     restart: unless-stopped
     image: aquasec/trivy:0.75.0
@@ -184,7 +186,7 @@ services:
     # --bip: docker0 ข้างใน deploy-host ปกติใช้วง 172.17.0.0/16 ถ้า LAB_HOST อยู่ในวงนั้น (เครือข่ายลูกค้าบางที่ใช้ 172.17.x)
     # deploy-host จะคิดว่า LAB_HOST อยู่ในวงตัวเอง แล้ว pull image จาก LAB_HOST:5000 ไม่ได้ (no route to host)
     # จึงย้ายไปวง /24 ที่แทบไม่มีใครใช้ ถ้าชนอีก เปลี่ยนที่ DEPLOY_HOST_BIP ใน .env
-    command: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock", "--insecure-registry=${LAB_HOST}:${REGISTRY_PORT:-5000}", "--bip=${DEPLOY_HOST_BIP:-172.31.255.1/24}"]
+    command: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock", "--insecure-registry=${LAB_HOST}:${REGISTRY_PORT:-5000}", "--insecure-registry=${LAB_HOST}:${HARBOR_HTTP_PORT:-8085}", "--bip=${DEPLOY_HOST_BIP:-172.31.255.1/24}"]
     ports:
       # web app ที่ deploy แล้วแยกตาม env (2375 ไม่เปิดออกนอก)
       - "${WEBAPP_PORT_DEV:-8088}:${WEBAPP_PORT_DEV:-8088}"   # dev  (branch develop)
@@ -227,14 +229,179 @@ services:
       retries: 30
       start_period: 20s
 
-  # ───────────── CLI แบบรันครั้งเดียว (docker compose run --rm <ชื่อ> ...) ─────────────
-  trivy:
-    image: aquasec/trivy:0.75.0
-    profiles: [cli]
+  # ───────────── Harbor (profile harbor ไม่รวมใน all) ─────────────
+  # v2.14.2 แยกจาก registry ของ pipeline ไว้สาธิต: สแกนตอน push, ห้าม pull image ที่มีช่องโหว่, robot account
+  # ก่อนเปิดครั้งแรกต้องสร้าง config: bash harbor/prepare.sh (setup.sh เรียกให้แล้ว)
+  # ต่างจากที่ติดตั้งด้วย install.sh: เก็บข้อมูลใน named volume แทน /data และไม่มี harbor-log (ดู log ด้วย docker compose logs)
+  # ทุกตัวอยู่ในเครือข่าย harbor ของตัวเอง ใช้ alias ตามชื่อที่ config ของ Harbor อ้าง (core, registry, redis, postgresql ...)
+  # จึงไม่ชนกับ service registry ของ workshop เข้าจากข้างนอกผ่าน LAB_HOST:HARBOR_HTTP_PORT ทางเดียว
+  # รันครั้งเดียวแล้วจบ: chown volume ให้ uid 10000 ที่ Harbor ใช้ (install.sh ทำขั้นนี้ให้ /data บน host
+  # แต่เราใช้ named volume ซึ่งเกิดมาเป็นของ root ไม่ทำ = push ไม่ได้ "mkdir /storage/docker: permission denied")
+  harbor-volume-init:
+    image: goharbor/registry-photon:v2.14.2
+    container_name: harbor-volume-init
+    profiles: [harbor]
+    user: root
+    entrypoint: ["sh", "-c", "chown 10000:10000 /v/registry /v/trivy /v/trivy-reports /v/job-logs /v/core-data"]
+    restart: "no"
     volumes:
-      - ./sample-app:/src:ro
-      - trivy-client-cache:/root/.cache/trivy
+      - harbor-registry:/v/registry
+      - harbor-trivy:/v/trivy
+      - harbor-trivy-reports:/v/trivy-reports
+      - harbor-job-logs:/v/job-logs
+      - harbor-core-data:/v/core-data
+    network_mode: none
 
+  harbor-db:
+    restart: unless-stopped
+    image: goharbor/harbor-db:v2.14.2
+    container_name: harbor-db
+    profiles: [harbor]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID]
+    shm_size: 256m
+    env_file: [./harbor/generated/config/db/env]
+    volumes:
+      - harbor-database:/var/lib/postgresql/data
+    networks:
+      harbor: { aliases: [postgresql] }
+
+  harbor-redis:
+    restart: unless-stopped
+    image: goharbor/redis-photon:v2.14.2
+    container_name: harbor-redis
+    profiles: [harbor]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    volumes:
+      - harbor-redis:/var/lib/redis
+    networks:
+      harbor: { aliases: [redis] }
+
+  harbor-registry:
+    restart: unless-stopped
+    image: goharbor/registry-photon:v2.14.2
+    container_name: harbor-registry
+    profiles: [harbor]
+    depends_on:
+      harbor-volume-init: { condition: service_completed_successfully }
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    volumes:
+      - harbor-registry:/storage
+      - ./harbor/generated/config/registry/:/etc/registry/
+      - ./harbor/generated/secret/registry/root.crt:/etc/registry/root.crt
+      - ./harbor/generated/config/shared/trust-certificates:/harbor_cust_cert
+    networks:
+      harbor: { aliases: [registry] }
+
+  harbor-registryctl:
+    restart: unless-stopped
+    image: goharbor/harbor-registryctl:v2.14.2
+    container_name: harbor-registryctl
+    profiles: [harbor]
+    depends_on:
+      harbor-volume-init: { condition: service_completed_successfully }
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    env_file: [./harbor/generated/config/registryctl/env]
+    volumes:
+      - harbor-registry:/storage
+      - ./harbor/generated/config/registry/:/etc/registry/
+      - ./harbor/generated/config/registryctl/config.yml:/etc/registryctl/config.yml
+      - ./harbor/generated/config/shared/trust-certificates:/harbor_cust_cert
+    networks:
+      harbor: { aliases: [registryctl] }
+
+  harbor-core:
+    restart: unless-stopped
+    image: goharbor/harbor-core:v2.14.2
+    container_name: harbor-core
+    profiles: [harbor]
+    depends_on:
+      harbor-db: { condition: service_started }
+      harbor-redis: { condition: service_started }
+      harbor-registry: { condition: service_started }
+      harbor-volume-init: { condition: service_completed_successfully }
+    cap_drop: [ALL]
+    cap_add: [SETGID, SETUID]
+    env_file: [./harbor/generated/config/core/env]
+    volumes:
+      - harbor-core-data:/data
+      - ./harbor/generated/config/core/certificates/:/etc/core/certificates/
+      - ./harbor/generated/config/core/app.conf:/etc/core/app.conf
+      - ./harbor/generated/secret/core/private_key.pem:/etc/core/private_key.pem
+      - ./harbor/generated/secret/keys/secretkey:/etc/core/key
+      - ./harbor/generated/config/shared/trust-certificates:/harbor_cust_cert
+    networks:
+      harbor: { aliases: [core] }
+
+  harbor-portal:
+    restart: unless-stopped
+    image: goharbor/harbor-portal:v2.14.2
+    container_name: harbor-portal
+    profiles: [harbor]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, NET_BIND_SERVICE]
+    volumes:
+      - ./harbor/generated/config/portal/nginx.conf:/etc/nginx/nginx.conf
+    networks:
+      harbor: { aliases: [portal] }
+
+  harbor-jobservice:
+    restart: unless-stopped
+    image: goharbor/harbor-jobservice:v2.14.2
+    container_name: harbor-jobservice
+    profiles: [harbor]
+    depends_on:
+      harbor-core: { condition: service_started }
+      harbor-volume-init: { condition: service_completed_successfully }
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    env_file: [./harbor/generated/config/jobservice/env]
+    volumes:
+      - harbor-job-logs:/var/log/jobs
+      - ./harbor/generated/config/jobservice/config.yml:/etc/jobservice/config.yml
+      - ./harbor/generated/config/shared/trust-certificates:/harbor_cust_cert
+    networks:
+      harbor: { aliases: [jobservice] }
+
+  # ตัวสแกนของ Harbor (install.sh ใส่ให้เฉพาะเมื่อสั่ง --with-trivy ไม่มีตัวนี้ = image ที่ push เข้าไปไม่ถูกสแกน)
+  harbor-trivy-adapter:
+    restart: unless-stopped
+    image: goharbor/trivy-adapter-photon:v2.14.2
+    container_name: harbor-trivy-adapter
+    profiles: [harbor]
+    depends_on:
+      harbor-redis: { condition: service_started }
+      harbor-volume-init: { condition: service_completed_successfully }
+    cap_drop: [ALL]
+    env_file: [./harbor/generated/config/trivy-adapter/env]
+    volumes:
+      - harbor-trivy:/home/scanner/.cache/trivy
+      - harbor-trivy-reports:/home/scanner/.cache/reports
+      - ./harbor/generated/config/shared/trust-certificates:/harbor_cust_cert
+    networks:
+      harbor: { aliases: [trivy-adapter] }
+
+  # ทางเข้าเดียวของ Harbor: หน้าเว็บ + docker push/pull ที่ http://LAB_HOST:HARBOR_HTTP_PORT
+  harbor-proxy:
+    restart: unless-stopped
+    image: goharbor/nginx-photon:v2.14.2
+    container_name: harbor-nginx
+    profiles: [harbor]
+    depends_on: [harbor-core, harbor-portal, harbor-registry]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, NET_BIND_SERVICE]
+    ports:
+      - "${HARBOR_HTTP_PORT:-8085}:8080"
+    volumes:
+      - ./harbor/generated/config/nginx:/etc/nginx
+      - ./harbor/generated/config/shared/trust-certificates:/harbor_cust_cert
+    networks:
+      harbor: { aliases: [nginx] }
+
+  # ───────────── CLI แบบรันครั้งเดียว (docker compose run --rm <ชื่อ> ...) ─────────────
   buildctl:
     image: moby/buildkit:v0.33.1
     profiles: [cli]
@@ -243,13 +410,6 @@ services:
       BUILDKIT_HOST: tcp://buildkitd:1234
     volumes:
       - ./sample-app:/src:ro
-
-  helm:
-    image: alpine/helm:3.22.0
-    profiles: [cli]
-    working_dir: /work
-    volumes:
-      - ./sample-app:/work
 
   sonar-scanner:
     image: sonarsource/sonar-scanner-cli:12.2.0.4256_8.1.0
@@ -270,13 +430,21 @@ volumes:
   sonar-logs:
   sonar-db:
   trivy-cache:
-  trivy-client-cache:
   buildkit-state:
   registry-data:
   vault-data:
   vault-logs:
   deploy-host-data:
+  harbor-database:
+  harbor-redis:
+  harbor-registry:
+  harbor-core-data:
+  harbor-job-logs:
+  harbor-trivy:
+  harbor-trivy-reports:
 
 networks:
   default:
     name: devsecops_workshop
+  harbor:
+    name: devsecops_workshop_harbor

@@ -5,3 +5,5 @@ sample-app/.scannerwork/
 reports/
 images/
 __pycache__/
+harbor/generated/
+harbor-prepare.err

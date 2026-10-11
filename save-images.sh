@@ -13,7 +13,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p images
 
-mapfile -t imgs < <(docker compose --profile all config --images | sort -u)
+# compose อ่าน service ของ Harbor ได้ต่อเมื่อมี config แล้ว
+[ -f harbor/generated/config/core/env ] || bash harbor/prepare.sh
+mapfile -t imgs < <( { docker compose --profile all --profile harbor config --images; echo goharbor/prepare:v2.14.2; } | sort -u)
 for img in "${imgs[@]}"; do
   docker image inspect "$img" >/dev/null 2>&1 || { echo "ไม่มี $img ในเครื่อง: docker compose --profile all pull แล้ว build ก่อน"; exit 1; }
 done

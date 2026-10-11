@@ -4,7 +4,7 @@
 #   2) ตรวจ RAM / CPU / ดิสก์
 #   3) ตั้ง vm.max_map_count ให้ SonarQube (ถาวร)
 #   4) สร้าง .env: หา IP ของเครื่องเอง และสุ่มรหัสทุกช่อง (ถ้ามี .env อยู่แล้วจะไม่ทับ แค่ตรวจ LAB_HOST)
-#   5) โหลด image จากไฟล์ offline ถ้ามี (images/*.tar.gz) แล้วเช็คว่าครบไหม
+#   5) โหลด image จากไฟล์ offline ถ้ามี (images/*.tar.gz), สร้าง config ของ Harbor, แล้วเช็คว่า image ครบไหม
 #   6) ตรวจว่าออกเน็ตไปที่ที่ workshop ต้องใช้ได้ไหม
 #
 # ใช้:  bash setup.sh                      (หา IP เอง)
@@ -71,6 +71,9 @@ if [ ! -f .env ]; then
   set_env SONAR_ADMIN_PASSWORD "'Sq1!$(rand 18)'"
   set_env VAULT_ROOT_TOKEN "root-$(rand 24)"
   set_env VAULT_JENKINS_SECRET_ID "$(rand 32)"
+  # Harbor บังคับรหัส admin มีตัวใหญ่ ตัวเล็ก และตัวเลข
+  set_env HARBOR_ADMIN_PASSWORD "Hb1$(rand 20)"
+  set_env HARBOR_DB_PASSWORD "$(rand 20)"
   chmod 600 .env
   ok "สร้าง .env แล้ว LAB_HOST=$host_ip รหัสทุกช่องสุ่มใหม่"
   case "$(host_ips | wc -w)" in
@@ -89,11 +92,18 @@ else
   fi
 fi
 
-echo "== 5. image"
-# อ่านรายการ image จาก compose (ต้องมี .env แล้ว ไม่งั้นตัวแปรบังคับทำให้ config พัง)
-images_list=$(docker compose --profile all config --images 2>&1) || fail "docker compose อ่าน docker-compose.yml ไม่ได้:
-$images_list"
-[ -n "$images_list" ] || fail "docker compose ไม่คืนรายการ image เลย ตรวจ docker-compose.yml"
+# .env ที่สร้างก่อนมี Harbor ยังไม่มีค่าของ Harbor: เติมให้ ไม่แตะค่าอื่น
+if ! grep -q '^HARBOR_ADMIN_PASSWORD=' .env; then
+  printf '
+# ---- Harbor (เติมโดย setup.sh) ----
+HARBOR_HTTP_PORT=8085
+HARBOR_ADMIN_PASSWORD=Hb1%s
+HARBOR_DB_PASSWORD=%s
+' "$(rand 20)" "$(rand 20)" >> .env
+  ok "เติมค่าของ Harbor ลง .env แล้ว"
+fi
+
+echo "== 5. image + config ของ Harbor"
 shopt -s nullglob
 for b in images/*.tar.gz; do
   mark="images/.loaded-$(basename "$b")"
@@ -103,12 +113,25 @@ for b in images/*.tar.gz; do
   docker load -q -i "$b" | sed 's/^/       /'
   touch "$mark" 2>/dev/null || true   # images/ อาจเป็น USB แบบอ่านอย่างเดียว
 done
+# Harbor ต้องมี config ที่สร้างจาก .env ก่อน compose ถึงจะอ่าน service ของ Harbor ได้
+if bash harbor/prepare.sh >/dev/null 2>harbor-prepare.err; then
+  rm -f harbor-prepare.err
+  ok "สร้าง config ของ Harbor แล้ว (harbor/generated/)"
+  profiles="--profile all --profile harbor"
+else
+  warn "สร้าง config ของ Harbor ไม่ได้ (ดู harbor-prepare.err) ส่วนอื่นของ workshop ใช้ได้ตามปกติ"
+  profiles="--profile all"
+fi
+# อ่านรายการ image จาก compose (ต้องมี .env แล้ว ไม่งั้นตัวแปรบังคับทำให้ config พัง)
+images_list=$(docker compose $profiles config --images 2>&1) || fail "docker compose อ่าน docker-compose.yml ไม่ได้:
+$images_list"
+[ -n "$images_list" ] || fail "docker compose ไม่คืนรายการ image เลย ตรวจ docker-compose.yml"
 missing=()
-for img in $images_list; do
+for img in $images_list goharbor/prepare:v2.14.2; do
   docker image inspect "$img" >/dev/null 2>&1 || missing+=("$img")
 done
 if [ ${#missing[@]} -eq 0 ]; then
-  ok "image ครบทั้ง $(echo $images_list | wc -w) ตัว เปิดระบบได้โดยไม่ต้อง pull"
+  ok "image ครบทั้ง $(( $(echo $images_list | wc -w) + 1 )) ตัว เปิดระบบได้โดยไม่ต้อง pull"
   NEED_BUILD=""
 else
   warn "ยังไม่มี image ${#missing[@]} ตัว ตอน up จะ pull จาก internet (และ build Jenkins): ${missing[*]}"
@@ -152,3 +175,6 @@ echo "  GitLab    http://$lab:8929   root / ดู GITLAB_ROOT_PASSWORD ใน .
 echo "  Jenkins   http://$lab:8080   admin / ดู JENKINS_ADMIN_PASSWORD ใน .env"
 echo "  SonarQube http://$lab:9000   admin / admin แล้วเปลี่ยนเป็น SONAR_ADMIN_PASSWORD ใน .env"
 echo "  Vault     http://$lab:8200   Token = VAULT_ROOT_TOKEN ใน .env"
+echo
+echo "Harbor (เปิดแยก): docker compose --profile harbor up -d"
+echo "  Harbor    http://$lab:$(sed -n 's/^HARBOR_HTTP_PORT=//p' .env)   admin / ดู HARBOR_ADMIN_PASSWORD ใน .env"
