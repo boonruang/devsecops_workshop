@@ -1,8 +1,9 @@
 // Pipeline หลักของ sample-app แบบ Multibranch เลียนแบบ pipeline จริงของ glo-portal
 //
-//   branch develop  ->  dev   TAG dev-build-<N>   http://LAB_HOST:8088   container glo-dev-sample-app
-//   branch uat      ->  uat   TAG uat-build-<N>   http://LAB_HOST:8089   container glo-uat-sample-app
-//   git tag (v1.0.0)->  prd   TAG = ชื่อ tag       http://LAB_HOST:8090   container glo-prd-sample-app
+//   branch develop  ->  dev   TAG dev-build-<N>   http://LAB_HOST:8088   container glo-dev-frontend
+//   branch uat      ->  uat   TAG uat-build-<N>   http://LAB_HOST:8089   container glo-uat-frontend
+//   git tag (v1.0.0)->  prd   TAG = ชื่อ tag       http://LAB_HOST:8090   container glo-prd-frontend
+//   image: <registry>/<env>/glo-frontend:<TAG>  เช่น 192.168.0.120:5000/prd/glo-frontend:v1.1.0
 //   branch อื่น      ->  ci    รันแค่ Vault + Gate 1-2 ไม่ build ไม่ deploy
 //
 // โครง stage ตาม glo-portal: Checkout > Prepare > Environment Check > Vault > Gate > Build > Trivy > Deploy > Verify
@@ -59,7 +60,8 @@ pipeline {
   }
 
   environment {
-    IMAGE = "${env.IMAGE_REGISTRY}/workshop/sample-app"
+    // ชื่อ app ใช้ตั้งชื่อ image / container / chart (แบบ glo-backend-net ของ pipeline จริง)
+    APP_NAME = 'glo-frontend'
   }
 
   options {
@@ -102,7 +104,9 @@ pipeline {
             }
             env.DEPLOYABLE    = (env.ENV_NAME != 'ci').toString()
             env.APP_PREFIX    = "glo-${env.ENV_NAME}"
-            env.CONTAINER     = "${env.APP_PREFIX}-sample-app"
+            // image แยกตาม env: <registry>/<env>/glo-frontend (ใน Harbor = project dev / uat / prd)
+            env.IMAGE         = "${env.IMAGE_REGISTRY}/${env.ENV_NAME}/${env.APP_NAME}"
+            env.CONTAINER     = "${env.APP_PREFIX}-frontend"
             env.APP_PORT      = ports[env.ENV_NAME] ?: ''
             // SonarQube Community วิเคราะห์ได้ทีละ branch ต่อ project จึงแยก project ตาม env แบบของจริง
             env.SONAR_PROJECT = "workshop-sample-app-${env.ENV_NAME}"
@@ -179,8 +183,11 @@ pipeline {
           tracked {
             withVault([vaultSecrets: [[path: 'secret/workshop/sonar', secretValues: [[envVar: 'SONAR_TOKEN', vaultKey: 'token']]]]]) {
               // qualitygate.wait=true ให้ scanner รอผลแล้ว exit 1 เองถ้าไม่ผ่าน
+              // projectVersion = TAG ของ build นี้: Sonar นับ "โค้ดใหม่" เฉพาะที่เปลี่ยนจาก build ก่อน
+              // (ไม่ใส่ = นับสะสมตั้งแต่ analysis แรก แก้โค้ดหลายรอบแล้ว new_coverage < 80% ทำให้ gate ตก)
               sh '''sonar-scanner -Dsonar.host.url="$SONAR_HOST_URL" -Dsonar.token="$SONAR_TOKEN" \
                       -Dsonar.projectKey="$SONAR_PROJECT" -Dsonar.projectName="Workshop Sample App ($ENV_NAME)" \
+                      -Dsonar.projectVersion="${TAG:-ci-$BUILD_NUMBER}" \
                       -Dsonar.qualitygate.wait=true'''
             }
           }
@@ -208,8 +215,8 @@ pipeline {
               buildctl build \
                 --frontend dockerfile.v0 --local context=. --local dockerfile=. \
                 --output type=image,name="$IMAGE:$TAG",push=true,registry.insecure=true \
-                --export-cache type=registry,ref="$IMAGE:buildcache",registry.insecure=true \
-                --import-cache type=registry,ref="$IMAGE:buildcache",registry.insecure=true
+                --export-cache type=registry,ref="$IMAGE_REGISTRY/cache/$APP_NAME:buildcache",registry.insecure=true \
+                --import-cache type=registry,ref="$IMAGE_REGISTRY/cache/$APP_NAME:buildcache",registry.insecure=true
             '''
           }
         }
@@ -237,7 +244,7 @@ pipeline {
             sh '''
               helm lint ./chart
               helm package ./chart --app-version "$TAG" -d dist
-              helm push dist/sample-app-*.tgz "oci://$IMAGE_REGISTRY/charts" --plain-http
+              helm push "dist/$APP_NAME-"*.tgz "oci://$IMAGE_REGISTRY/charts" --plain-http
             '''
           }
         }
@@ -245,7 +252,7 @@ pipeline {
     }
 
     // deploy-host คือ docker daemon แยก (docker:dind) จำลองเครื่อง server ปลายทาง
-    // แต่ละ env เป็น container ของตัวเอง ชื่อ ${APP_PREFIX}-sample-app (เหมือน release glo-dev / glo-uat / glo-prd ของจริง)
+    // แต่ละ env เป็น container ของตัวเอง ชื่อ ${APP_PREFIX}-frontend (เหมือน release glo-dev / glo-uat / glo-prd ของจริง)
     stage('Deploy') {
       when {
         allOf {
@@ -261,13 +268,26 @@ pipeline {
                 set -euo pipefail
                 echo "--- [1/3] secret/$ENV_NAME/app-env จาก Vault ---"
                 bash ci/vault-env.sh "$ENV_NAME/app-env" "$WORKSPACE/.app.env"
-                printf 'APP_ENV=%s\\nAPP_VERSION=%s\\n' "$ENV_NAME" "$TAG" >> "$WORKSPACE/.app.env"
+                # ค่าที่หน้าเว็บแสดง: แต่ละบรรทัดใน env-file เป็น KEY=ค่า (ค่ามีเว้นวรรคได้ ไม่ต้องใส่ quote)
+                {
+                  echo "APP_ENV=$ENV_NAME"
+                  echo "APP_VERSION=$TAG"
+                  echo "APP_IMAGE=$IMAGE:$TAG"
+                  echo "APP_COMMIT=${GIT_COMMIT:0:8}"
+                  echo "APP_BUILD=$JOB_NAME #$BUILD_NUMBER"
+                  echo "APP_DEPLOYED_AT=$BUILD_DATE"
+                  echo "APP_PORT_DEV=$WEBAPP_PORT_DEV"
+                  echo "APP_PORT_UAT=$WEBAPP_PORT_UAT"
+                  echo "APP_PORT_PRD=$WEBAPP_PORT_PRD"
+                } >> "$WORKSPACE/.app.env"
 
                 echo "--- [2/3] pull $IMAGE:$TAG บน $(docker info --format '{{.Name}}') ---"
                 docker pull -q "$IMAGE:$TAG"
 
                 echo "--- [3/3] แทน container $CONTAINER ---"
                 # lab ยอมให้ดับไม่กี่วินาที งานจริงใช้ blue/green หรือ rolling update ของ kube
+                # ลบทุก container ของ env นี้ (ดูจาก label) รวมตัวที่ใช้ชื่อเก่า ไม่งั้นพอร์ตชนกัน
+                docker ps -aq --filter "label=workshop.env=$ENV_NAME" | xargs -r docker rm -f >/dev/null
                 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
                 docker run -d --name "$CONTAINER" --restart unless-stopped \
                   --label workshop.env="$ENV_NAME" --label workshop.tag="$TAG" \

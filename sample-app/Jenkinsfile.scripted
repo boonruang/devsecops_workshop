@@ -1,5 +1,5 @@
 // Scripted Pipeline: เขียนเป็น Groovy ทั้งไฟล์ คุม flow เองได้ทั้งหมด (ตัวแปร, if, function, try/catch, parallel)
-// ทำงานเหมือน Jenkinsfile (declarative) แต่ล็อกไว้ที่ branch develop และ deploy ทับ env dev (container glo-dev-sample-app)
+// ทำงานเหมือน Jenkinsfile (declarative) แต่ล็อกไว้ที่ branch develop และ deploy ทับ env dev (container glo-dev-frontend)
 // pipeline หลักคือ multibranch job sample-app ไฟล์นี้มีไว้ฝึกเขียน Groovy
 //
 // ใช้ได้สองแบบ:
@@ -31,11 +31,11 @@ def gate(List results, String name, Closure body) {
 node {
   // build แรกของ job ยังไม่มี params (properties เพิ่งถูกตั้ง) จึงต้องมีค่า default สำรอง
   def tag = "scripted-build-${env.BUILD_NUMBER}"
-  def container = 'glo-dev-sample-app'
+  def container = 'glo-dev-frontend'
   def deploy = (params.DEPLOY == null) ? true : params.DEPLOY
   def fsSeverity = params.TRIVY_FS_SEVERITY ?: 'HIGH,CRITICAL'
 
-  withEnv(["IMAGE=${env.IMAGE_REGISTRY}/workshop/sample-app", "IMAGE_TAG=${tag}"]) {
+  withEnv(["IMAGE=${env.IMAGE_REGISTRY}/dev/glo-frontend", "IMAGE_TAG=${tag}"]) {
     timestamps {
       try {
         stage('Checkout') {
@@ -58,7 +58,8 @@ node {
             'Gate 1: SonarQube': {
               gate(results, 'Gate 1 SonarQube Quality Gate') {
                 withVault([vaultSecrets: [[path: 'secret/workshop/sonar', secretValues: [[envVar: 'SONAR_TOKEN', vaultKey: 'token']]]]]) {
-                  sh 'sonar-scanner -Dsonar.host.url="$SONAR_HOST_URL" -Dsonar.token="$SONAR_TOKEN" -Dsonar.qualitygate.wait=true'
+                  // projectVersion = tag ของ build นี้ ให้ Sonar นับโค้ดใหม่เฉพาะที่เปลี่ยนจาก build ก่อน
+                  sh 'sonar-scanner -Dsonar.host.url="$SONAR_HOST_URL" -Dsonar.token="$SONAR_TOKEN" -Dsonar.projectVersion="$IMAGE_TAG" -Dsonar.qualitygate.wait=true'
                 }
               }
             },
@@ -76,8 +77,8 @@ node {
             buildctl build \
               --frontend dockerfile.v0 --local context=. --local dockerfile=. \
               --output type=image,name="$IMAGE:$IMAGE_TAG",push=true,registry.insecure=true \
-              --export-cache type=registry,ref="$IMAGE:buildcache",registry.insecure=true \
-              --import-cache type=registry,ref="$IMAGE:buildcache",registry.insecure=true
+              --export-cache type=registry,ref="$IMAGE_REGISTRY/cache/glo-frontend:buildcache",registry.insecure=true \
+              --import-cache type=registry,ref="$IMAGE_REGISTRY/cache/glo-frontend:buildcache",registry.insecure=true
           '''
         }
 
@@ -91,7 +92,7 @@ node {
           sh '''
             helm lint ./chart
             helm package ./chart --app-version "$IMAGE_TAG" -d dist
-            helm push dist/sample-app-*.tgz "oci://$IMAGE_REGISTRY/charts" --plain-http
+            helm push dist/glo-frontend-*.tgz "oci://$IMAGE_REGISTRY/charts" --plain-http
           '''
         }
 
@@ -103,8 +104,19 @@ node {
                 sh '''#!/bin/bash
                   set -euo pipefail
                   bash ci/vault-env.sh dev/app-env "$WORKSPACE/.app.env"
-                  printf 'APP_ENV=dev\\nAPP_VERSION=%s\\n' "$IMAGE_TAG" >> "$WORKSPACE/.app.env"
+                  {
+                    echo "APP_ENV=dev"
+                    echo "APP_VERSION=$IMAGE_TAG"
+                    echo "APP_IMAGE=$IMAGE:$IMAGE_TAG"
+                    echo "APP_COMMIT=$(git rev-parse --short=8 HEAD)"
+                    echo "APP_BUILD=$JOB_NAME #$BUILD_NUMBER"
+                    echo "APP_DEPLOYED_AT=$(TZ=Asia/Bangkok date '+%Y-%m-%d %H:%M:%S')"
+                    echo "APP_PORT_DEV=$WEBAPP_PORT_DEV"
+                    echo "APP_PORT_UAT=$WEBAPP_PORT_UAT"
+                    echo "APP_PORT_PRD=$WEBAPP_PORT_PRD"
+                  } >> "$WORKSPACE/.app.env"
                   docker pull -q "$IMAGE:$IMAGE_TAG"
+                  docker ps -aq --filter "label=workshop.env=dev" | xargs -r docker rm -f >/dev/null
                   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
                   docker run -d --name "$CONTAINER" --restart unless-stopped \
                     --label workshop.env=dev --label workshop.tag="$IMAGE_TAG" \

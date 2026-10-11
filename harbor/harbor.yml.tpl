@@ -26,6 +26,7 @@ jobservice:
   max_job_duration_hours: 24
   job_loggers:
     - STD_OUTPUT
+    - FILE
   logger_sweeper_duration: 1
 notification:
   webhook_job_max_retry: 3

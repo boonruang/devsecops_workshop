@@ -12,6 +12,16 @@ pipeline หลักเป็น **Multibranch Pipeline** แบบเดีย
 | git tag เช่น `v1.0.0` | prd | ชื่อ tag | `http://LAB_HOST:8090` |
 | branch อื่น (`main`, `feature/*`) | ci | ไม่ build image | รันแค่ Vault + Gate 1-2 |
 
+ชื่อ image และ container ตั้งตามแบบ pipeline จริง (`${REGISTRY}/${PROJECT}/glo-backend-net`, release `${APP_PREFIX}-backend`):
+
+| env | image | container |
+|---|---|---|
+| dev | `LAB_HOST:5000/dev/glo-frontend:dev-build-<N>` | `glo-dev-frontend` |
+| uat | `LAB_HOST:5000/uat/glo-frontend:uat-build-<N>` | `glo-uat-frontend` |
+| prd | `LAB_HOST:5000/prd/glo-frontend:<tag>` | `glo-prd-frontend` |
+
+ส่วนแรกของ path คือ env (ใน Harbor คือชื่อ project) ส่วนที่สองคือชื่อ app ดูทั้งหมดใน registry: `curl http://LAB_HOST:5000/v2/_catalog`
+
 ```
 GitLab --webhook (push / tag)--> Jenkins multibranch "sample-app"
    Prepare            branch/tag -> ENV_NAME, TAG, container, port
@@ -52,16 +62,76 @@ GitLab --webhook (push / tag)--> Jenkins multibranch "sample-app"
 
 ## เปิดระบบ (Ubuntu 24.04)
 
+### 1. ติดตั้ง Docker Engine และ Docker Compose
+
+**แบบ A (แนะนำ ทดสอบแล้ว):** ติดตั้งจาก apt ของ Ubuntu เอง ใช้ mirror ของ Ubuntu ซึ่งเครือข่ายองค์กรส่วนใหญ่เปิดไว้อยู่แล้ว
+
 ```bash
-# 1. ติดตั้ง docker จาก apt ของ Ubuntu (ได้ engine 29.x + compose 2.40)
-sudo apt update && sudo apt install -y docker.io docker-compose-v2
-sudo usermod -aG docker $USER        # แล้ว logout / login ใหม่ 1 ครั้ง
+sudo apt update
+sudo apt install -y docker.io docker-compose-v2 git curl
+sudo systemctl enable --now docker       # ให้ docker เปิดเองทุกครั้งที่ boot
+sudo usermod -aG docker $USER            # ให้ user นี้สั่ง docker ได้โดยไม่ต้อง sudo
+```
 
-# 2. ถ้าผู้สอนแจกไฟล์ image offline ให้วาง *.tar.gz ทั้งหมดไว้ในโฟลเดอร์ images/ ข้างไฟล์นี้
+แล้ว **logout / login ใหม่ 1 ครั้ง** (หรือพิมพ์ `newgrp docker` ใน terminal เดิม) เพื่อให้สิทธิ์กลุ่ม docker มีผล ตรวจว่าใช้ได้:
 
-# 3. เตรียมเครื่อง แล้วเปิดระบบ
+```bash
+docker version --format 'engine {{.Server.Version}}'   # ต้องได้ 24 ขึ้นไป (Ubuntu 24.04 ได้ 29.x)
+docker compose version                                 # v2 ขึ้นไป (แบบ A ได้ 2.40, แบบ B ได้ v5.x ใช้ได้ทั้งคู่)
+docker info >/dev/null && echo OK                      # ถ้าขึ้น permission denied แปลว่ายังไม่ได้ logout / login
+```
+
+**แบบ B:** ติดตั้งจาก repo ของ Docker (ได้รุ่นใหม่กว่า แต่ต้องออก `download.docker.com` ได้) ใช้แทนแบบ A ห้ามลงทั้งสองแบบ
+ถ้าเคยลงแบบ A ไว้ ให้ถอนก่อน `sudo apt remove -y docker.io docker-compose-v2`
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates curl git
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable"   | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker $USER            # แล้ว logout / login ใหม่ 1 ครั้ง
+```
+
+คำสั่งที่ใช้ใน workshop คือ `docker compose` (เว้นวรรค เป็น plugin รุ่นปัจจุบัน) ไม่ใช่ `docker-compose` (มีขีด เป็น v1 รุ่นเก่าที่เลิกพัฒนาแล้ว)
+ทดสอบติดตั้งทั้งสองแบบบน Ubuntu 24.04 แล้ว: แบบ A ได้ engine 29.1 + compose 2.40 (รัน workshop ทดสอบครบ), แบบ B ได้ engine 29.9 + compose 5.6 (workshop พัฒนาบน compose 5.5)
+
+### 2. clone workshop จาก GitHub
+
+```bash
+cd ~
+git clone https://github.com/boonruang/devsecops_workshop.git
+cd devsecops_workshop
+```
+
+ถ้าเครือข่ายออก github.com ไม่ได้ ใช้ไฟล์ที่ผู้สอนแจกแทน (เนื้อหาเหมือนกัน):
+
+```bash
+tar xzf devsecops_workshop-2026-10-11.tar.gz
+cd devsecops_workshop
+```
+
+ผู้สอนแก้ไฟล์ระหว่างอบรมแล้วอยากได้ของใหม่: `git pull` (ไม่ทับ `.env` และ `images/` เพราะอยู่ใน `.gitignore`)
+
+### 3. วางไฟล์ image offline (ถ้าผู้สอนแจก)
+
+```bash
+mkdir -p images
+cp /media/$USER/<ชื่อ USB>/images/* images/      # หรือคัดลอกจาก file share ที่ผู้สอนบอก
+cd images && sha256sum -c --quiet SHA256SUMS && echo "ไฟล์ครบ" && cd ..
+```
+
+ไม่มีไฟล์ offline ก็ข้ามขั้นนี้ได้ ระบบจะ pull จาก internet แทน (ช้ากว่า และชนโควต้า Docker Hub ได้ถ้าทั้งห้องใช้ IP เดียวกัน)
+
+### 4. เตรียมเครื่อง แล้วเปิดระบบ
+
+```bash
 bash setup.sh
 docker compose --profile all up -d   # ไม่มีไฟล์ image offline ให้เติม --build (setup.sh บอกให้)
+docker compose --profile all ps      # รอจน gitlab ขึ้น (healthy) ประมาณ 5 นาที
 ```
 
 `bash setup.sh` ทำให้ทั้งหมดนี้ รันซ้ำได้ ไม่ทับ `.env` ที่มีอยู่แล้ว:
@@ -121,13 +191,13 @@ Docker Hub ให้ pull แบบไม่ login ได้ **100 ครั้�
 - เป็น docker daemon **แยก** จากของเครื่อง host Jenkins มีแค่ docker CLI และสั่งงานผ่าน `DOCKER_HOST=tcp://deploy-host:2375`
   Jenkins จึงไม่ต้อง mount `/var/run/docker.sock` ของเครื่องจริง (ถ้า mount = Jenkins มีสิทธิ์เท่า root ของ host)
 - deploy-host pull image จาก registry ของ lab แบบ http ได้เพราะตั้ง `--insecure-registry=LAB_HOST:5000` ไว้ใน compose แล้ว
-- แต่ละ env เป็น container ของตัวเอง `glo-dev-sample-app`, `glo-uat-sample-app`, `glo-prd-sample-app`
+- แต่ละ env เป็น container ของตัวเอง `glo-dev-frontend`, `glo-uat-frontend`, `glo-prd-frontend`
   พอร์ต 8088 / 8089 / 8090 เปลี่ยนได้ที่ `WEBAPP_PORT_DEV/UAT/PRD` ใน `.env`
 
 ดูว่าบน deploy-host มีอะไรรันอยู่:
 ```bash
 docker compose exec deploy-host docker ps
-docker compose exec deploy-host docker logs glo-dev-sample-app
+docker compose exec deploy-host docker logs glo-dev-frontend
 ```
 
 ## ขั้นตอน Lab
@@ -249,7 +319,7 @@ report จะเปิดได้เพราะ compose ตั้ง `-Dhudson
 สแกนเองนอก pipeline แล้วได้ report HTML (คำสั่ง trivy อยู่ใน Jenkins เท่านั้น ไม่มี container trivy แยก):
 ```bash
 docker compose exec jenkins trivy image --server http://trivy-server:4954 --insecure \
-  --format template --template @/opt/trivy/html.tpl -o /tmp/trivy-report.html LAB_HOST:5000/workshop/sample-app:v1.0.0
+  --format template --template @/opt/trivy/html.tpl -o /tmp/trivy-report.html LAB_HOST:5000/prd/glo-frontend:v1.1.0
 docker compose cp jenkins:/tmp/trivy-report.html ./trivy-report.html
 ```
 
@@ -329,7 +399,7 @@ stage `Deploy` เรียก `ci/vault-env.sh` อ่าน **ทุก key** 
 docker compose exec -e VAULT_TOKEN=<VAULT_ROOT_TOKEN> vault \
   sh -c 'vault kv get -field=APP_SECRET_KEY secret/dev/app-env | sha256sum | cut -c1-12'
 ```
-ข้อจำกัดที่ควรบอกผู้เรียน: คนที่เข้าถึง deploy-host ได้ยังเห็นค่าผ่าน `docker inspect glo-dev-sample-app`
+ข้อจำกัดที่ควรบอกผู้เรียน: คนที่เข้าถึง deploy-host ได้ยังเห็นค่าผ่าน `docker inspect glo-dev-frontend`
 งานจริงจึงให้ app ไปอ่าน Vault เอง (Vault Agent) หรือใช้ secret ของ orchestrator แทน env
 
 ## สาธิต Harbor (เปิดแยกด้วย profile harbor)
@@ -345,8 +415,8 @@ docker compose --profile harbor up -d      # ประมาณ 1 นาที (
 
 | ขั้น | ทำอะไร | เห็นอะไร |
 |---|---|---|
-| 1 | Projects > New Project ชื่อ `workshop` > เข้า project > Configuration ติ๊ก **Automatically scan images on push** | |
-| 2 | push image จาก deploy-host (คำสั่งด้านล่าง) | Repositories มี `sample-app` คอลัมน์ Vulnerabilities ขึ้นผลสแกนเองภายในไม่กี่นาที (ทดสอบได้ High 44) |
+| 1 | Projects > New Project ชื่อ `prd` (ชื่อ project = env เหมือนชื่อ image) > เข้า project > Configuration ติ๊ก **Automatically scan images on push** | |
+| 2 | push image จาก deploy-host (คำสั่งด้านล่าง) | Repositories มี `prd/glo-frontend` คอลัมน์ Vulnerabilities ขึ้นผลสแกนเองภายในไม่กี่นาที (ทดสอบได้ High 44) |
 | 3 | Configuration ติ๊ก **Prevent vulnerable images from running** เลือก High แล้ว pull ซ้ำ | pull ไม่ได้ `412 Precondition Failed` image ที่มีช่องโหว่ถูกกันไว้ที่ registry |
 | 4 | Robot Accounts > New Robot Account สิทธิ์ push/pull เฉพาะ project นี้ | รหัสของ robot เอาไปเก็บใน Vault แทนรหัส admin (โจทย์ต่อยอด) |
 
@@ -354,9 +424,9 @@ docker compose --profile harbor up -d      # ประมาณ 1 นาที (
 docker compose exec deploy-host sh
 # ข้างใน deploy-host (ตั้ง --insecure-registry ของ Harbor ไว้แล้ว)
 docker login LAB_HOST:8085 -u admin
-docker tag LAB_HOST:5000/workshop/sample-app:v1.0.0 LAB_HOST:8085/workshop/sample-app:v1.0.0
-docker push LAB_HOST:8085/workshop/sample-app:v1.0.0
-docker image rm LAB_HOST:8085/workshop/sample-app:v1.0.0 && docker pull LAB_HOST:8085/workshop/sample-app:v1.0.0   # ขั้น 3
+docker tag LAB_HOST:5000/prd/glo-frontend:v1.1.0 LAB_HOST:8085/prd/glo-frontend:v1.1.0
+docker push LAB_HOST:8085/prd/glo-frontend:v1.1.0
+docker image rm LAB_HOST:8085/prd/glo-frontend:v1.1.0 && docker pull LAB_HOST:8085/prd/glo-frontend:v1.1.0   # ขั้น 3
 ```
 
 ประเด็นคุยในห้อง: ติดตั้ง Harbor ด้วย `install.sh` โดยไม่ใส่ `--with-trivy` จะไม่มี container `trivy-adapter`
@@ -371,11 +441,11 @@ image ที่ push เข้าไปจะไม่ถูกสแกนเ�
 
 ```bash
 # Trivy: คำสั่งอยู่ใน Jenkins เท่านั้น (ไม่มี container trivy แยก) สแกน image ใน registry ด้วยมือผ่าน container jenkins
-docker compose exec jenkins trivy image --server http://trivy-server:4954 --insecure --severity HIGH,CRITICAL LAB_HOST:5000/workshop/sample-app:v1.0.0
+docker compose exec jenkins trivy image --server http://trivy-server:4954 --insecure --severity HIGH,CRITICAL LAB_HOST:5000/prd/glo-frontend:v1.1.0
 
 # BuildKit: build แล้ว push (รันซ้ำรอบสองจะเห็น cache ทำให้เร็วขึ้น)
 docker compose run --rm buildctl build --frontend dockerfile.v0 --local context=/src --local dockerfile=/src \
-  --output type=image,name=registry:5000/workshop/sample-app:dev,push=true,registry.insecure=true
+  --output type=image,name=registry:5000/dev/glo-frontend:manual,push=true,registry.insecure=true
 
 # Helm ไม่มี container: chart คือไฟล์ source ใน sample-app/chart ที่อยู่ใน repo GitLab เดียวกับโค้ด
 # pipeline ตรวจด้วย helm lint (คำสั่ง helm อยู่ใน image ของ Jenkins) ถ้ามี helm ในเครื่องก็ลองเองได้
@@ -401,12 +471,13 @@ docker compose exec -e VAULT_TOKEN=<VAULT_ROOT_TOKEN> vault vault kv get secret/
 | container เรียก `LAB_HOST` ไม่ถึงเลย (BuildKit push ไม่ได้) ทั้งที่เบราว์เซอร์เปิดได้ | network ที่ docker สร้าง (172.17-31.x / 192.168.x) ทับวง LAN ของลูกค้า ดูวงด้วย `docker network inspect devsecops_workshop` แล้วตั้ง `default-address-pools` ใน `/etc/docker/daemon.json` ให้พ้นวงของลูกค้า |
 | `setup.sh` เตือนว่าเครื่องมีหลาย IP | VM มีหลายการ์ดแลน (เช่น NAT + Bridged) เลือก IP ที่เครื่องอื่นเข้าถึง: ลบ `.env` แล้ว `LAB_HOST=<IP> bash setup.sh` |
 | `./setup.sh: Permission denied` | ไฟล์เสีย bit execute ระหว่างคัดลอก ใช้ `bash setup.sh` แทน |
+| Gate 1 ตก `QUALITY GATE STATUS: FAILED` เงื่อนไข `new_coverage` (Coverage on New Code < 80%) | Quality Gate ค่าเริ่มต้น (Sonar way) บังคับ coverage ของโค้ดใหม่ แต่ lab ไม่ได้ส่งผล coverage ไปให้ Sonar ค่าจึงเป็น 0 Sonar ข้ามเงื่อนไขนี้ถ้าโค้ดใหม่ไม่ถึง 20 บรรทัด ถ้าแก้ทีละมากจะตก pipeline ส่ง `sonar.projectVersion=TAG` ให้นับโค้ดใหม่เทียบกับ build ก่อนแล้ว ใช้เป็นโจทย์ได้: เขียน test + ส่ง coverage (`pytest --cov --cov-report xml` แล้วตั้ง `sonar.python.coverage.reportPaths`) หรือใน lab สร้าง Quality Gate ของตัวเองใน SonarQube |
 | `docker compose ps` ไม่เห็นอะไรเลย | ต้องใส่ `--profile all` ด้วย เพราะทุก service ผูกกับ profile |
 | credential ที่เพิ่มในหน้าเว็บ Jenkins หายหลัง restart | JCasC เขียนทับ credential ของระบบทั้งชุดทุกครั้งที่ Jenkins เปิด ให้ประกาศใน `jenkins/casc/jenkins.yaml` และเก็บค่าจริงใน Vault |
 | เมนู Trivy Report เปิดแล้วหน้าเปล่าหรือไม่มีสี | Jenkins ยังใช้ CSP ค่าเดิม เช็คว่า `JAVA_OPTS` ใน compose มี `DirectoryBrowserSupport.CSP=` แล้ว `up -d jenkins` |
 | job Scripted ขึ้น `Scripts not permitted to use method ...` | ใช้ method ที่ Groovy Sandbox ไม่อนุญาต ไปกด Approve ที่ Manage Jenkins > In-process Script Approval หรือเปลี่ยนไปใช้ step ของ Jenkins แทน |
 | ใน Docker Desktop เห็น Vault แค่ container เดียว | ถูกแล้ว init (policy, AppRole, audit, secret ตั้งต้น) รันอยู่ใน container `vault` เอง healthy แปลว่า init เสร็จแล้ว |
-| Verify App ตก `app ไม่ขึ้น หรือยังเป็นเวอร์ชันเก่า` | ดู log ที่ stage พิมพ์ให้ หรือ `docker compose exec deploy-host docker logs glo-<env>-sample-app` |
+| Verify App ตก `app ไม่ขึ้น หรือยังเป็นเวอร์ชันเก่า` | ดู log ที่ stage พิมพ์ให้ หรือ `docker compose exec deploy-host docker logs glo-<env>-frontend` |
 | push tag แล้ว Jenkins ไม่ build | ยังไม่ได้เพิ่ม Build strategy **Tags** หรือ tag เก่ากว่า 3 วัน หรือ webhook ไม่ได้ติ๊ก Tag push events |
 | branch `main` ขึ้น SUCCESS แต่ไม่มี container | ถูกแล้ว branch อื่นนอกจาก develop/uat เป็น env `ci` รันแค่ gate |
 | deploy-host pull image ไม่ได้ `http: server gave HTTP response to HTTPS client` | `LAB_HOST` ใน `.env` ไม่ตรงกับชื่อ registry ใน image ทำให้ `--insecure-registry` ไม่ครอบ แก้ `.env` แล้ว `up -d deploy-host` |

@@ -21,6 +21,15 @@ mkdir -p "$gen"
       -e "s|__HARBOR_ADMIN_PASSWORD__|$HARBOR_ADMIN_PASSWORD|g" -e "s|__HARBOR_DB_PASSWORD__|$HARBOR_DB_PASSWORD|g" \
       harbor/harbor.yml.tpl > "$gen/harbor.yml" )
 
+# prepare สุ่มรหัสภายในใหม่ทุกครั้ง (core secret, รหัสที่ core ใช้คุยกับ registry ฯลฯ) และไฟล์ที่ mount อยู่เปลี่ยนทันที
+# ถ้า Harbor เปิดอยู่จะได้ 401 ทั่วระบบจนกว่าจะ recreate จึงสร้างใหม่เฉพาะเมื่อค่าใน .env หรือ template เปลี่ยน
+sum=$(sha256sum "$gen/harbor.yml" | cut -c1-64)
+if [ -f "$gen/config/core/env" ] && [ "$(cat "$gen/.input.sha256" 2>/dev/null)" = "$sum" ] && [ "${1:-}" != "--force" ]; then
+  echo "Harbor config เดิมยังใช้ได้ (ค่าใน .env ไม่เปลี่ยน) ข้าม  [สร้างใหม่: bash harbor/prepare.sh --force]"
+  exit 0
+fi
+regen=0; [ -f "$gen/config/core/env" ] && regen=1
+
 # Git Bash บน Windows ต้องส่ง path แบบ C:/... ให้ docker
 here=$(pwd -W 2>/dev/null || pwd)
 # ใน container: prepare อ่าน /input เขียน config ลง /config เขียน key ลง /data/secret
@@ -38,5 +47,9 @@ MSYS_NO_PATHCONV=1 docker run --rm -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)"
   rm -rf /gen/secret && cp -a /data/secret /gen/secret
   chown "$HOST_UID:$HOST_GID" /gen/config/*/env
 ' >"$gen/prepare.log" 2>&1 || { tail -20 "$gen/prepare.log"; exit 1; }
+echo "$sum" > "$gen/.input.sha256"
 
 echo "Harbor config พร้อม: http://$LAB_HOST:$HARBOR_HTTP_PORT  (admin / HARBOR_ADMIN_PASSWORD ใน .env)"
+if [ "$regen" = 1 ]; then
+  echo "สร้าง config ใหม่ทับของเดิม ถ้า Harbor เปิดอยู่ต้องสั่ง: docker compose --profile harbor up -d --force-recreate"
+fi
