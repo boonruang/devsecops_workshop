@@ -57,6 +57,7 @@ pipeline {
 
   parameters {
     booleanParam(name: 'DEPLOY', defaultValue: true, description: 'deploy หลังผ่านทุก gate (มีผลเฉพาะ develop, uat และ tag)')
+    choice(name: 'ZAP_FAIL_ON', choices: ['High', 'Medium', 'none'], description: 'Gate 4 (OWASP ZAP) ตกเมื่อเจอ alert ระดับนี้ขึ้นไป')
   }
 
   environment {
@@ -143,6 +144,7 @@ pipeline {
               check "Registry            $IMAGE_REGISTRY"  'curl -sf http://$IMAGE_REGISTRY/v2/'
               check "BuildKit            $BUILDKIT_HOST"   'buildctl debug workers'
               check "deploy-host docker  $DOCKER_HOST"     'docker info'
+              check "OWASP ZAP           ${ZAP_URL:-http://zap:8080}" 'curl -sf ${ZAP_URL:-http://zap:8080}/JSON/core/view/version/'
               [ "$fail" = 0 ] || { echo "มี server ไม่พร้อม หยุดตรงนี้ดีกว่าไปตกกลางทาง"; exit 1; }
             '''
           }
@@ -329,6 +331,25 @@ pipeline {
         }
       }
     }
+
+    // Gate 4 (DAST): OWASP ZAP baseline scan ยิงเว็บที่รันอยู่จริง ด่านนี้จึงอยู่หลัง deploy
+    // งานจริงทำที่ dev / uat ก่อนเลื่อนขึ้น prd: ตกที่ dev แปลว่ายังไม่ควร tag ขึ้น prd
+    // baseline = spider + passive scan ไม่ส่ง payload โจมตี (สคริปต์อยู่ที่ ci/zap-gate.sh)
+    stage('Gate 4: OWASP ZAP baseline') {
+      when {
+        allOf {
+          environment name: 'DEPLOYABLE', value: 'true'
+          expression { params.DEPLOY }
+        }
+      }
+      steps {
+        script {
+          tracked {
+            sh 'bash ci/zap-gate.sh "http://deploy-host:$APP_PORT" "${ZAP_FAIL_ON:-High}"'
+          }
+        }
+      }
+    }
   }
 
   post {
@@ -338,6 +359,9 @@ pipeline {
       archiveArtifacts artifacts: 'reports/*', allowEmptyArchive: true
       publishHTML(target: [reportName: 'Trivy Report', reportDir: 'reports',
                            reportFiles: 'trivy-fs.html,trivy-image.html', reportTitles: 'trivy fs,trivy image',
+                           allowMissing: true, keepAll: true, alwaysLinkToLastBuild: true])
+      publishHTML(target: [reportName: 'ZAP Report', reportDir: 'reports', reportFiles: 'zap.html',
+                           reportTitles: 'OWASP ZAP baseline',
                            allowMissing: true, keepAll: true, alwaysLinkToLastBuild: true])
     }
     success {

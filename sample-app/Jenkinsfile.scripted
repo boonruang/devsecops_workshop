@@ -141,6 +141,13 @@ node {
             sh 'docker ps --filter label=workshop.env --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}"'
             echo "เปิดดูได้ที่ http://${env.LAB_HOST}:${env.WEBAPP_PORT_DEV}"
           }
+
+          // Gate 4 (DAST) ต้องมีเว็บที่รันอยู่ให้ยิง จึงอยู่หลัง deploy
+          stage('Gate 4: OWASP ZAP baseline') {
+            gate(results, 'Gate 4 OWASP ZAP baseline (High)') {
+              sh 'bash ci/zap-gate.sh "http://deploy-host:$WEBAPP_PORT_DEV" High'
+            }
+          }
         } else {
           echo 'DEPLOY = false ข้าม deploy'
         }
@@ -156,6 +163,9 @@ node {
         archiveArtifacts artifacts: 'reports/*', allowEmptyArchive: true
         publishHTML(target: [reportName: 'Trivy Report', reportDir: 'reports',
                              reportFiles: 'trivy-fs.html,trivy-image.html', reportTitles: 'trivy fs,trivy image',
+                             allowMissing: true, keepAll: true, alwaysLinkToLastBuild: true])
+        publishHTML(target: [reportName: 'ZAP Report', reportDir: 'reports', reportFiles: 'zap.html',
+                             reportTitles: 'OWASP ZAP baseline',
                              allowMissing: true, keepAll: true, alwaysLinkToLastBuild: true])
         echo "สรุป gate\n" + (results ? results.join('\n') : '(ยังไม่ถึง gate)')
       }

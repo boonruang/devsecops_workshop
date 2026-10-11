@@ -33,7 +33,8 @@ GitLab --webhook (push / tag)--> Jenkins multibranch "sample-app"
    Gate 3             trivy image              (CRITICAL)  │ เฉพาะ develop / uat / tag
    Helm               package + push chart                 │
    Deploy             secret/<env>/app-env -> docker run บน deploy-host
-   Verify             /version ต้องตรงกับ TAG               ┘
+   Verify             /version ต้องตรงกับ TAG               │
+   Gate 4             OWASP ZAP baseline (DAST)             ┘
    post               แจ้งผล (ของจริงส่ง LINE) + Trivy Report
 ```
 
@@ -44,6 +45,7 @@ GitLab --webhook (push / tag)--> Jenkins multibranch "sample-app"
 | SonarQube | `http://LAB_HOST:9000` | ครั้งแรก `admin` / `admin` ระบบบังคับเปลี่ยน แล้วจดรหัสใหม่ไว้ที่ `SONAR_ADMIN_PASSWORD` ใน `.env` |
 | Vault | `http://LAB_HOST:8200` | Token = `VAULT_ROOT_TOKEN` ใน `.env` |
 | Harbor (profile `harbor` เปิดแยก) | `http://LAB_HOST:8085` | `admin` / `HARBOR_ADMIN_PASSWORD` ใน `.env` |
+| OWASP ZAP | ไม่เปิดพอร์ตออกนอก | daemon ไม่มีหน้าเว็บ Jenkins เรียกผ่าน `http://zap:8080` report ดูในหน้า build เมนู **ZAP Report** |
 | Trivy server | `http://LAB_HOST:4954` | ไม่มีหน้าเว็บ report ดูในหน้า build ของ Jenkins เมนู **Trivy Report** |
 | Registry | `http://LAB_HOST:5000/v2/_catalog` | เปิดโล่ง ไม่มีรหัส (เฉพาะ lab) |
 | BuildKit | ไม่เปิดพอร์ตออกนอก | Jenkins เรียกผ่าน `tcp://buildkitd:1234` |
@@ -152,7 +154,7 @@ Docker Desktop บน Windows ใช้ได้เหมือนกัน แ�
 Docker Hub ให้ pull แบบไม่ login ได้ **100 ครั้งต่อชั่วโมงต่อ IP ขาออก** (วัดจาก header `ratelimit-limit: 100;w=3600`)
 ห้องอบรมที่ทุกเครื่องออกเน็ตผ่าน IP เดียวกัน ใช้เครื่องละ ~10 image แค่ 10 เครื่องก็ชนเพดานแล้ว และ Jenkins ต้อง build เอง (โหลด plugin จาก internet)
 
-บนเครื่องที่ up ระบบได้แล้ว รัน `bash save-images.sh` ได้ `images/*.tar.gz` หนึ่งไฟล์ต่อ image (20 ไฟล์ รวม ~4.2 GB นับ Jenkins ที่ build แล้วและ Harbor ด้วย) พร้อม `SHA256SUMS`
+บนเครื่องที่ up ระบบได้แล้ว รัน `bash save-images.sh` ได้ `images/*.tar.gz` หนึ่งไฟล์ต่อ image (20 ไฟล์ รวม ~5.3 GB นับ Jenkins ที่ build แล้ว, Harbor และ ZAP ด้วย) พร้อม `SHA256SUMS`
 แจกผ่าน USB หรือ file share ผู้เรียนวางในโฟลเดอร์ `images/` แล้วรัน `bash setup.sh`
 
 ### เครือข่ายของลูกค้า: ปลายทางที่ lab ต้องออกไปถึง
@@ -182,7 +184,7 @@ Docker Hub ให้ pull แบบไม่ login ได้ **100 ครั้�
 
 ครั้งแรก GitLab ใช้เวลาประมาณ 3-5 นาทีกว่าจะเข้าเว็บได้ รอจนกว่า `docker compose --profile all ps` จะขึ้น `gitlab ... (healthy)`
 
-เปิดเฉพาะบางส่วนได้ด้วย profile: `gitlab` · `jenkins` · `sonar` · `trivy` · `build` · `vault` · `deploy` · `harbor` (Harbor ไม่รวมใน `all`)
+เปิดเฉพาะบางส่วนได้ด้วย profile: `gitlab` · `jenkins` · `sonar` · `trivy` · `zap` · `build` · `vault` · `deploy` · `harbor` (Harbor ไม่รวมใน `all`)
 (profile `jenkins` จะเปิด sonar, trivy, buildkit, registry, vault, deploy-host ไปด้วย เพราะ pipeline ต้องใช้ครบ)
 
 ## ปลายทาง deploy: deploy-host
@@ -261,7 +263,7 @@ stage `Vault: Jenkins ดึง secret` พิสูจน์เรื่อง�
 
 แบบฝึกหัด: อัปเดต `requirements.txt` เป็นรุ่นที่แก้แล้ว push ใหม่ webhook จะเริ่ม build เอง
 pipeline ของ `develop` ต้องผ่านทุก stage แล้วเปิด `http://LAB_HOST:8088` ได้ หน้าแรกขึ้น `dev` และ version `dev-build-<N>`
-จากนั้น merge เข้า `uat` (ขึ้น :8089) แล้วติด tag (ขึ้น :8090) ให้เห็นของชิ้นเดียวเดินผ่านครบสาม env
+จากนั้นส่งงานต่อไป uat และ prd ตามขั้นที่ 6 ให้เห็นของชิ้นเดียวเดินผ่านครบสาม env
 
 ```
 flask==3.1.3
@@ -278,6 +280,51 @@ requests==2.34.2
 Quality Gate ผ่านตั้งแต่รอบแรก เพราะ Sonar way ตรวจเฉพาะ new code และการวิเคราะห์ครั้งแรกยังไม่มี new code ให้เทียบ
 Sonar แยก project ตาม env (`workshop-sample-app-dev`, `-uat`, `-prd`, `-ci`) เพราะ Community Edition ไม่มี branch analysis
 แบบเดียวกับที่ glo-portal ตั้ง `glo-portal-backend-dev/uat/prd`
+
+### 6. ส่งงานข้าม env ด้วย Git: develop → uat → prd
+
+ทุกขั้นแค่ push แล้ว webhook จะเริ่ม pipeline เอง ไม่ต้องกดอะไรใน Jenkins (ทดสอบคำสั่งชุดนี้กับ lab แล้ว)
+
+```bash
+# ครั้งแรก: clone มาที่เครื่อง แล้วตั้งชื่อผู้ commit
+git clone http://root:<token>@LAB_HOST:8929/root/sample-app.git
+cd sample-app
+git config user.name  "Student 01"
+git config user.email "student01@workshop.local"
+
+# 1) ทำงานบน develop  ->  deploy ขึ้น dev  http://LAB_HOST:8088  (TAG dev-build-<N>)
+git checkout develop
+git pull
+#    ... แก้โค้ด ...
+git add -A
+git commit -m "แก้ requirements.txt ให้ผ่าน Gate 2"
+git push origin develop
+
+# 2) dev ผ่านแล้ว merge develop เข้า uat  ->  deploy ขึ้น uat  http://LAB_HOST:8089  (TAG uat-build-<N>)
+git checkout uat
+git pull
+git merge --no-ff develop -m "merge develop เข้า uat"
+git push origin uat
+
+# 3) uat ผ่านแล้วติด tag ที่ commit ล่าสุดของ uat  ->  deploy ขึ้น prd  http://LAB_HOST:8090  (TAG = ชื่อ tag)
+git tag -a v1.3.0 -m "release v1.3.0"
+git push origin v1.3.0
+```
+
+ดูว่าแต่ละ env รันเวอร์ชันไหน: เปิดหน้าเว็บ หรือ `curl http://LAB_HOST:8090/version` จะได้ `version`, `commit` และ `image`
+ดูประวัติ branch และ tag: `git log --oneline --graph --all` · ดู tag ทั้งหมด: `git tag -l`
+
+| เรื่อง | ทำอย่างไร |
+|---|---|
+| ตั้งชื่อ tag | `vMAJOR.MINOR.PATCH` (Semantic Versioning) เช่น แก้บั๊ก `v1.3.1` เพิ่มฟีเจอร์ `v1.4.0` เปลี่ยนแบบไม่เข้ากันกับของเดิม `v2.0.0` ชื่อ tag ต้องขึ้นต้นด้วย `v` และใช้ซ้ำไม่ได้ |
+| ทำไมใช้ `--no-ff` | ได้ merge commit บน uat เห็นชัดใน `git log --graph` ว่าของชุดไหนถูกส่งขึ้น uat เมื่อไร |
+| Merge Request แทน merge เอง | GitLab > project > Merge requests > New: source `develop` target `uat` งานจริงตั้ง protected branch ไม่ให้ push uat ตรง และบังคับให้ผ่าน MR + pipeline ก่อน |
+| branch งานย่อย | `git checkout -b feature/fix-sql develop` แล้ว push: Jenkins รันแค่ Vault + Gate 1-2 (env `ci`) ไม่ deploy แล้วค่อย merge เข้า develop |
+| ถอยกลับเวอร์ชันเดิม (rollback) | Jenkins > `sample-app` > job ของ tag เดิม เช่น `v1.2.0` > Build with Parameters จะ deploy เวอร์ชันนั้นกลับขึ้น prd |
+| เก็บ main ให้ตรงกับ prd (ถ้าใช้ main) | หลังติด tag: `git checkout main && git merge --ff-only uat && git push origin main` |
+| push tag แล้ว Jenkins ไม่ build | เช็ค Build strategies ว่าเพิ่ม **Tags** แล้ว (ขั้นที่ 4) และ tag ไม่เก่ากว่า 3 วัน |
+
+ถ้าสองคน push พร้อมกัน (เช่น uat กับ tag ติดกัน) Gate 4 จะต่อคิวใช้ ZAP ทีละ build เห็นข้อความ `ZAP กำลังสแกนให้ build อื่นอยู่ รอคิว`
 
 ## เทียบกับ pipeline จริงของ glo-portal
 
@@ -322,6 +369,26 @@ docker compose exec jenkins trivy image --server http://trivy-server:4954 --inse
   --format template --template @/opt/trivy/html.tpl -o /tmp/trivy-report.html LAB_HOST:5000/prd/glo-frontend:v1.1.0
 docker compose cp jenkins:/tmp/trivy-report.html ./trivy-report.html
 ```
+
+## OWASP ZAP: Gate 4 (DAST)
+
+SonarQube กับ Trivy ตรวจโค้ดและ dependency ส่วน ZAP ตรวจ **เว็บที่รันอยู่จริง** จึงอยู่หลัง Deploy
+pipeline ทำ baseline scan (spider หา URL แล้ว passive scan ดู request / response ไม่ส่ง payload โจมตี) ผ่าน API ของ container `zap`
+
+| ดูที่ไหน | ได้อะไร |
+|---|---|
+| หน้า build > เมนู **ZAP Report** | report HTML แยกตาม alert พร้อม URL ที่เจอ คำอธิบาย และวิธีแก้ |
+| หน้า build > **Build Artifacts** > `reports/zap.json` | ผลดิบ JSON |
+| Console Output stage Gate 4 | บรรทัด `ผลทุกระดับ: High=0 Medium=6 Low=10 ...` และรายการ alert |
+
+ผลจากการทดสอบจริงกับ glo-frontend: High 0, Medium 6 (ไม่มี CSP header, ไม่มี anti-clickjacking header), Low 10
+รวมถึง **Private IP Disclosure** เพราะหน้าเว็บแสดงชื่อ image ที่มี IP ภายใน เป็นตัวอย่างที่ SAST มองไม่เห็นแต่ DAST เห็น
+
+- เลือกระดับที่ทำให้ตกได้ที่ parameter `ZAP_FAIL_ON` (High / Medium / none) ลอง Medium จะเห็น Gate 4 ตก
+- baseline ไม่เจอ SQL injection ใน `/tickets` เพราะไม่ยิง payload ต้องใช้ active scan ซึ่งห้ามยิงใส่ระบบจริงโดยไม่ได้รับอนุญาต
+- งานจริงทำ Gate 4 ที่ dev / uat: ตกที่ dev แปลว่ายังไม่ควร tag ขึ้น prd
+- สแกนเองนอก pipeline (ได้ report ที่ /tmp/reports ใน container jenkins):
+  `docker compose cp sample-app/ci/zap-gate.sh jenkins:/tmp/` แล้ว `docker compose exec -w /tmp jenkins bash zap-gate.sh http://deploy-host:8088 High`
 
 ## Jenkins แบบ Scripted Pipeline
 
@@ -409,7 +476,12 @@ Harbor v2.14.2 (9 container ตามแบบติดตั้งมาตร�
 ```bash
 bash harbor/prepare.sh                     # setup.sh เรียกให้แล้ว ต้องรันใหม่เมื่อเปลี่ยน LAB_HOST
 docker compose --profile harbor up -d      # ประมาณ 1 นาที (RAM เพิ่ม ~1 GB)
+bash harbor/replicate.sh                   # ให้ Harbor ดึง image ที่ pipeline build ทุก 2 นาที
 ```
+
+`harbor/replicate.sh` สร้าง project `dev` `uat` `prd` (สแกนอัตโนมัติ) และ replication rule ที่ดึง image จาก registry ของ pipeline (`LAB_HOST:5000`)
+เข้า Harbor ตามชื่อ เช่น `prd/glo-frontend:v1.2.0` ไปอยู่ที่ Projects > prd > glo-frontend pipeline ไม่ต้องแก้อะไร
+ดูรอบการดึงได้ที่ Administration > Replications (ของจริงให้ pipeline push เข้า Harbor ตรง ใน lab ใช้ replication เพื่อให้ pipeline ทำงานได้แม้ไม่เปิด Harbor)
 
 เปิด `http://LAB_HOST:8085` login `admin` / `HARBOR_ADMIN_PASSWORD` ใน `.env` แล้วทำตามนี้
 
@@ -472,6 +544,7 @@ docker compose exec -e VAULT_TOKEN=<VAULT_ROOT_TOKEN> vault vault kv get secret/
 | `setup.sh` เตือนว่าเครื่องมีหลาย IP | VM มีหลายการ์ดแลน (เช่น NAT + Bridged) เลือก IP ที่เครื่องอื่นเข้าถึง: ลบ `.env` แล้ว `LAB_HOST=<IP> bash setup.sh` |
 | `./setup.sh: Permission denied` | ไฟล์เสีย bit execute ระหว่างคัดลอก ใช้ `bash setup.sh` แทน |
 | Gate 1 ตก `QUALITY GATE STATUS: FAILED` เงื่อนไข `new_coverage` (Coverage on New Code < 80%) | Quality Gate ค่าเริ่มต้น (Sonar way) บังคับ coverage ของโค้ดใหม่ แต่ lab ไม่ได้ส่งผล coverage ไปให้ Sonar ค่าจึงเป็น 0 Sonar ข้ามเงื่อนไขนี้ถ้าโค้ดใหม่ไม่ถึง 20 บรรทัด ถ้าแก้ทีละมากจะตก pipeline ส่ง `sonar.projectVersion=TAG` ให้นับโค้ดใหม่เทียบกับ build ก่อนแล้ว ใช้เป็นโจทย์ได้: เขียน test + ส่ง coverage (`pytest --cov --cov-report xml` แล้วตั้ง `sonar.python.coverage.reportPaths`) หรือใน lab สร้าง Quality Gate ของตัวเองใน SonarQube |
+| Gate 4 ตก `curl: (7) Failed to connect to zap` | container zap ยังไม่ขึ้นหรือหยุดเพราะ RAM ไม่พอ ดู `docker compose --profile all ps zap` ZAP ใช้ประมาณ 700 MB |
 | `docker compose ps` ไม่เห็นอะไรเลย | ต้องใส่ `--profile all` ด้วย เพราะทุก service ผูกกับ profile |
 | credential ที่เพิ่มในหน้าเว็บ Jenkins หายหลัง restart | JCasC เขียนทับ credential ของระบบทั้งชุดทุกครั้งที่ Jenkins เปิด ให้ประกาศใน `jenkins/casc/jenkins.yaml` และเก็บค่าจริงใน Vault |
 | เมนู Trivy Report เปิดแล้วหน้าเปล่าหรือไม่มีสี | Jenkins ยังใช้ CSP ค่าเดิม เช็คว่า `JAVA_OPTS` ใน compose มี `DirectoryBrowserSupport.CSP=` แล้ว `up -d jenkins` |
@@ -500,6 +573,7 @@ docker compose --profile all down -v     # หยุดและล้างข�
 | Trivy | `aquasec/trivy:0.75.0` |
 | BuildKit | `moby/buildkit:v0.33.1` |
 | Helm (คำสั่งใน image ของ Jenkins ไม่มี container) | `3.22.0` (คัดลอกจาก `alpine/helm:3.22.0` ตอน build) |
+| OWASP ZAP | `zaproxy/zap-stable:20260807` (ZAP 2.17.0) |
 | Vault | `hashicorp/vault:2.1.1` |
 | Harbor | `goharbor/*:v2.14.2` |
 | Registry | `registry:3.1.2` |

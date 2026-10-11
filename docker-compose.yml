@@ -1,11 +1,11 @@
-# DevSecOps Workshop: GitLab · Jenkins · SonarQube · Trivy · BuildKit · Vault · Harbor
+# DevSecOps Workshop: GitLab · Jenkins · SonarQube · Trivy · BuildKit · Vault · OWASP ZAP · Harbor
 # Helm ไม่มี container: chart เป็น source อยู่ใน sample-app/chart (เก็บใน GitLab) ส่วนคำสั่ง helm อยู่ใน image ของ Jenkins
 # ปลายทาง deploy คือ deploy-host (docker daemon แยก จำลองเครื่อง server) ไม่ต้องมี Kubernetes
 #
 # เตรียมเครื่อง:  bash setup.sh   (Linux: ตรวจเครื่อง, ตั้ง sysctl, โหลด image offline, สร้าง .env)
 # เปิดทั้งชุด:   docker compose --profile all up -d   (เติม --build ถ้าไม่ได้โหลด image offline)
 # เปิดบางส่วน:   docker compose --profile sonar --profile trivy up -d
-# profile:      gitlab · jenkins · sonar · trivy · build · vault · deploy · all · harbor (แยก ไม่รวมใน all)
+# profile:      gitlab · jenkins · sonar · trivy · zap · build · vault · deploy · all · harbor (แยก ไม่รวมใน all)
 #
 # Jenkins เปิดคู่กับ build + vault + trivy + sonar เสมอ เพราะ pipeline เรียกใช้ทั้งหมด
 
@@ -80,6 +80,7 @@ services:
       BUILDKIT_HOST: tcp://buildkitd:1234
       TRIVY_SERVER: http://trivy-server:4954
       SONAR_HOST_URL: http://sonarqube:9000
+      ZAP_URL: http://zap:8080
       IMAGE_REGISTRY: ${LAB_HOST}:${REGISTRY_PORT:-5000}
       # docker CLI ใน Jenkins สั่งงาน docker daemon ของ deploy-host ไม่ใช่ของเครื่องจริง
       DOCKER_HOST: tcp://deploy-host:2375
@@ -200,6 +201,30 @@ services:
       timeout: 5s
       retries: 30
       start_period: 10s
+
+  # ───────────── OWASP ZAP (DAST) ─────────────
+  # ZAP แบบ daemon ไม่มีหน้าเว็บ pipeline สั่งผ่าน API (sample-app/ci/zap-gate.sh) แบบเดียวกับ trivy-server:
+  # server กลางอยู่ใน compose ส่วนสคริปต์อยู่ใน Jenkins ไม่ต้องให้ Jenkins ใช้ docker ของเครื่อง
+  # Gate 4 ทำ baseline scan (spider + passive scan) กับ app ที่ deploy แล้วบน deploy-host แล้วเก็บ report ไว้กับ build
+  # ปิด API key เพราะไม่เปิดพอร์ตออกนอกเครื่อง เข้าได้เฉพาะ container ในเครือข่าย workshop (เฉพาะ lab)
+  zap:
+    restart: unless-stopped
+    image: zaproxy/zap-stable:20260807
+    container_name: zap
+    profiles: [zap, jenkins, all]
+    command: >-
+      zap.sh -daemon -host 0.0.0.0 -port 8080
+      -config api.disablekey=true
+      -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true
+    environment:
+      # จำกัด heap ของ Java ให้พอดีเครื่องผู้เรียน (16 GB รวมทุก service)
+      _JAVA_OPTIONS: -Xmx768m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/JSON/core/view/version/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
 
   # ───────────── Vault ─────────────
   # container เดียวจบ: server mode + file storage, unseal เอง, แล้วรัน init.sh (policy, AppRole, audit, secret ตั้งต้น)
