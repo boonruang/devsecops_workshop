@@ -2,7 +2,14 @@
 # build ทำผ่าน buildkitd, deploy สั่ง docker daemon ของ deploy-host, เครื่องมืออื่นเรียก server กลางใน compose
 FROM moby/buildkit:v0.33.1 AS buildkit
 FROM aquasec/trivy:0.75.0 AS trivy
-FROM alpine/helm:3.22.0 AS helm
+# helm ไม่มี image ทางการ โหลด binary จาก get.helm.sh (แหล่งทางการ) แล้วตรวจ sha256 ก่อนใช้
+FROM alpine:3.22 AS helm
+ARG TARGETARCH=amd64
+ARG HELM_VERSION=v3.22.0
+RUN cd /tmp && f=helm-${HELM_VERSION}-linux-${TARGETARCH}.tar.gz \
+ && wget -q https://get.helm.sh/$f https://get.helm.sh/$f.sha256sum \
+ && sha256sum -c $f.sha256sum \
+ && tar xzf $f && mv linux-${TARGETARCH}/helm /usr/bin/helm
 FROM sonarsource/sonar-scanner-cli:12.2.0.4256_8.1.0 AS scanner
 FROM docker:29.8.2-cli AS dockercli
 

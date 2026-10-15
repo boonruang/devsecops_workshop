@@ -2,8 +2,8 @@
 # Helm ไม่มี container: chart เป็น source อยู่ใน sample-app/chart (เก็บใน GitLab) ส่วนคำสั่ง helm อยู่ใน image ของ Jenkins
 # ปลายทาง deploy คือ deploy-host (docker daemon แยก จำลองเครื่อง server) ไม่ต้องมี Kubernetes
 #
-# เตรียมเครื่อง:  bash setup.sh   (Linux: ตรวจเครื่อง, ตั้ง sysctl, โหลด image offline, สร้าง .env)
-# เปิดทั้งชุด:   docker compose --profile all up -d   (เติม --build ถ้าไม่ได้โหลด image offline)
+# เตรียมเครื่อง:  bash setup.sh   (Linux: ตรวจเครื่อง, ตั้ง sysctl, สร้าง .env)
+# เปิดทั้งชุด:   docker compose --profile all up -d   (pull image ทางการ + build Jenkins ในเครื่อง)
 # เปิดบางส่วน:   docker compose --profile sonar --profile trivy up -d
 # profile:      gitlab · jenkins · sonar · trivy · zap · build · vault · deploy · all · harbor (แยก ไม่รวมใน all)
 #
@@ -51,8 +51,11 @@ services:
   # ───────────── Jenkins ─────────────
   jenkins:
     restart: unless-stopped
+    # build ในเครื่องจาก jenkins/Dockerfile (ทุก FROM เป็น image ทางการ) ไม่มี image นี้บน registry ไหน
+    # pull_policy: build = ไม่ต้องลอง pull ชื่อนี้ก่อน (เดิมขึ้น pull access denied ให้ตกใจ)
     build: ./jenkins
     image: devsecops_workshop/jenkins:2.580.1-lts-jdk21
+    pull_policy: build
     container_name: jenkins
     profiles: [jenkins, all]
     depends_on:

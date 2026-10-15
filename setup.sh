@@ -4,7 +4,7 @@
 #   2) ตรวจ RAM / CPU / ดิสก์
 #   3) ตั้ง vm.max_map_count ให้ SonarQube (ถาวร)
 #   4) สร้าง .env: หา IP ของเครื่องเอง และสุ่มรหัสทุกช่อง (ถ้ามี .env อยู่แล้วจะไม่ทับ แค่ตรวจ LAB_HOST)
-#   5) โหลด image จากไฟล์ offline ถ้ามี (images/*.tar.gz), สร้าง config ของ Harbor, แล้วเช็คว่า image ครบไหม
+#   5) สร้าง config ของ Harbor แล้วเช็คว่า image ไหนยังต้อง pull (ใช้ image ทางการทั้งหมด Jenkins build เอง)
 #   6) ตรวจว่าออกเน็ตไปที่ที่ workshop ต้องใช้ได้ไหม
 #
 # ใช้:  bash setup.sh                      (หา IP เอง)
@@ -104,15 +104,6 @@ HARBOR_DB_PASSWORD=%s
 fi
 
 echo "== 5. image + config ของ Harbor"
-shopt -s nullglob
-for b in images/*.tar.gz; do
-  mark="images/.loaded-$(basename "$b")"
-  # โหลดแล้วข้าม (ไฟล์ gitlab ใหญ่ 1.5 GB โหลดซ้ำเสียเวลาเปล่า) ลบ images/.loaded-* ถ้าต้องการโหลดใหม่
-  if [ -f "$mark" ]; then echo "       ข้าม $b (โหลดไปแล้ว)"; continue; fi
-  echo "       โหลด $b"
-  docker load -q -i "$b" | sed 's/^/       /'
-  touch "$mark" 2>/dev/null || true   # images/ อาจเป็น USB แบบอ่านอย่างเดียว
-done
 # Harbor ต้องมี config ที่สร้างจาก .env ก่อน compose ถึงจะอ่าน service ของ Harbor ได้
 if bash harbor/prepare.sh >/dev/null 2>harbor-prepare.err; then
   rm -f harbor-prepare.err
@@ -128,14 +119,13 @@ $images_list"
 [ -n "$images_list" ] || fail "docker compose ไม่คืนรายการ image เลย ตรวจ docker-compose.yml"
 missing=()
 for img in $images_list goharbor/prepare:v2.14.2; do
+  case "$img" in devsecops_workshop/*) continue;; esac   # build เองตอน up ไม่ต้อง pull
   docker image inspect "$img" >/dev/null 2>&1 || missing+=("$img")
 done
 if [ ${#missing[@]} -eq 0 ]; then
-  ok "image ครบทั้ง $(( $(echo $images_list | wc -w) + 1 )) ตัว เปิดระบบได้โดยไม่ต้อง pull"
-  NEED_BUILD=""
+  ok "image ทางการมีในเครื่องครบแล้ว ตอน up จะ build แค่ Jenkins"
 else
-  warn "ยังไม่มี image ${#missing[@]} ตัว ตอน up จะ pull จาก internet (และ build Jenkins): ${missing[*]}"
-  NEED_BUILD=" --build"
+  echo "       ยังไม่มี image ${#missing[@]} ตัว ตอน up จะ pull จาก registry ทางการ: ${missing[*]}"
 fi
 
 echo "== 6. ออก internet"
@@ -151,16 +141,15 @@ else
   check "mirror.gcr.io" https://mirror.gcr.io/v2/        "Trivy โหลดฐานข้อมูลช่องโหว่ (Gate 2, 3 จะตก)"
   check "ghcr.io"      https://ghcr.io/v2/               "ทางสำรองของฐานข้อมูล Trivy"
   check "pypi.org"     https://pypi.org/simple/          "pip install ตอน build sample-app"
-  if [ -n "$NEED_BUILD" ]; then
-    check "Jenkins plugins" https://updates.jenkins.io/update-center.json "build image ของ Jenkins (ใช้ไฟล์ offline แทนได้)"
-  fi
+  check "Jenkins plugins" https://updates.jenkins.io/update-center.json "build image ของ Jenkins (โหลด plugin)"
+  check "get.helm.sh"  https://get.helm.sh/helm-v3.22.0-linux-amd64.tar.gz.sha256sum "build image ของ Jenkins (โหลด helm)"
   tok=$(curl -fsS -m 10 "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" 2>/dev/null | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' || true)
   if [ -n "$tok" ]; then
     left=$(curl -fsS -m 10 -I -H "Authorization: Bearer $tok" https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest 2>/dev/null \
            | tr -d '\r' | sed -n 's/^ratelimit-remaining: *\([0-9]*\).*/\1/Ip' | head -1 || true)
     if [ -n "$left" ]; then
       if [ "$left" -ge 20 ] || [ ${#missing[@]} -eq 0 ]; then ok "Docker Hub เหลือ pull ได้อีก $left ครั้งในชั่วโมงนี้ (นับต่อ IP ขาออก)"
-      else warn "Docker Hub เหลือ pull ได้อีก $left ครั้งในชั่วโมงนี้ ไม่พอ ให้ใช้ไฟล์ image offline"; fi
+      else warn "Docker Hub เหลือ pull ได้อีก $left ครั้งในชั่วโมงนี้ ไม่พอ ให้ docker login ด้วยบัญชี Docker Hub ก่อน up หรือรอชั่วโมงถัดไป"; fi
     fi
   fi
 fi
@@ -168,7 +157,7 @@ fi
 lab=$(sed -n 's/^LAB_HOST=//p' .env | tr -d "'\"")
 echo
 echo "เสร็จแล้ว (คำเตือน $WARNS ข้อ) เปิดระบบด้วย:"
-echo "  docker compose --profile all up -d$NEED_BUILD"
+echo "  docker compose --profile all up -d"
 echo
 echo "รอ GitLab ประมาณ 5 นาที แล้วเปิด:"
 echo "  GitLab    http://$lab:8929   root / ดู GITLAB_ROOT_PASSWORD ใน .env"

@@ -62,10 +62,11 @@ GitLab --webhook (push / tag)--> Jenkins multibranch "sample-app"
 
 | ปลายทาง | ใช้ตอนไหน | ถ้าโดนบล็อก |
 |---|---|---|
-| `registry-1.docker.io`, `auth.docker.io` | pull image (ไม่ต้องถ้าใช้ไฟล์ offline) และ BuildKit ดึง `python:3.12-slim` ตอน build sample-app ครั้งแรก | stage Build ตก |
+| `registry-1.docker.io`, `auth.docker.io` | pull image และ BuildKit ดึง `python:3.12-slim` ตอน build sample-app ครั้งแรก | stage Build ตก |
 | `pypi.org`, `files.pythonhosted.org` | `pip install` ตอน build sample-app | stage Build ตก |
 | `mirror.gcr.io` (สำรอง `ghcr.io`) | Trivy โหลดฐานข้อมูลช่องโหว่ | Gate 2, 3 ตก |
-| `updates.jenkins.io` และ mirror | build image ของ Jenkins (ไม่ต้องถ้าใช้ไฟล์ offline) | `up --build` ตก |
+| `updates.jenkins.io` และ mirror | build image ของ Jenkins (โหลด plugin) | `up` ตกตอน build Jenkins |
+| `get.helm.sh` | build image ของ Jenkins (โหลด helm) | `up` ตกตอน build Jenkins |
 
 ถ้าต้องออกผ่าน proxy มีสองที่ต้องตั้ง:
 - docker daemon (ใช้ตอน pull): สร้าง `/etc/systemd/system/docker.service.d/http-proxy.conf`
@@ -137,31 +138,20 @@ tar xzf devsecops_workshop-2026-10-11.tar.gz
 cd devsecops_workshop
 ```
 
-ผู้สอนแก้ไฟล์ระหว่างอบรมแล้วอยากได้ของใหม่: `git pull` (ไม่ทับ `.env` และ `images/` เพราะอยู่ใน `.gitignore`)
+ผู้สอนแก้ไฟล์ระหว่างอบรมแล้วอยากได้ของใหม่: `git pull` (ไม่ทับ `.env` เพราะอยู่ใน `.gitignore`)
 
-### 3. วางไฟล์ image offline (ถ้าผู้สอนแจก)
-
-```bash
-mkdir -p images
-cp /media/$USER/<ชื่อ USB>/images/* images/      # หรือคัดลอกจาก file share ที่ผู้สอนบอก
-cd images && sha256sum -c --quiet SHA256SUMS && echo "ไฟล์ครบ" && cd ..
-```
-
-ไม่มีไฟล์ offline ก็ข้ามขั้นนี้ได้ ระบบจะ pull จาก internet แทน (ช้ากว่า และชนโควต้า Docker Hub ได้ถ้าทั้งห้องใช้ IP เดียวกัน)
-วิธีทำไฟล์ชุดนี้อยู่ท้าย README หัวข้อ "เตรียมไฟล์ image offline (สำหรับผู้สอน)"
-
-### 4. เตรียมเครื่อง แล้วเปิดระบบ
+### 3. เตรียมเครื่อง แล้วเปิดระบบ
 
 ```bash
 bash setup.sh
-docker compose --profile all up -d   # ไม่มีไฟล์ image offline ให้เติม --build (setup.sh บอกให้)
+docker compose --profile all up -d   # pull image ทางการ + build Jenkins ในเครื่อง ครั้งแรกใช้เวลาตามความเร็วเน็ต
 docker compose --profile all ps      # รอจน gitlab ขึ้น (healthy) ประมาณ 5 นาที
 ```
 
 `bash setup.sh` ทำให้ทั้งหมดนี้ รันซ้ำได้ ไม่ทับ `.env` ที่มีอยู่แล้ว:
 - ตรวจ docker, compose, สิทธิ์ของ user, RAM, CPU, ดิสก์
 - ตั้ง `vm.max_map_count=524288` แบบถาวร (ไม่ตั้ง SonarQube จะหยุดเองภายในไม่กี่วินาที) ขั้นนี้ถาม sudo
-- `docker load` ไฟล์ใน `images/` แล้วเช็คว่า image ครบไหม
+- เช็คว่า image ไหนมีในเครื่องแล้ว ไหนยังต้อง pull
 - สร้าง `.env` จาก `.env.example` หา IP ของเครื่องใส่ `LAB_HOST` และสุ่มรหัสทุกช่องใหม่ ดูรหัสได้ใน `.env`
 - ตรวจว่าออก internet ไปที่ที่ lab ต้องใช้ได้ไหม และ Docker Hub เหลือโควต้า pull เท่าไร
 
@@ -555,6 +545,8 @@ docker compose exec -e VAULT_TOKEN=<VAULT_ROOT_TOKEN> vault vault kv get secret/
 | push tag แล้ว Jenkins ไม่ build | ยังไม่ได้เพิ่ม Build strategy **Tags** หรือ tag เก่ากว่า 3 วัน หรือ webhook ไม่ได้ติ๊ก Tag push events |
 | branch `main` ขึ้น SUCCESS แต่ไม่มี container | ถูกแล้ว branch อื่นนอกจาก develop/uat เป็น env `ci` รันแค่ gate |
 | deploy-host pull image ไม่ได้ `http: server gave HTTP response to HTTPS client` | `LAB_HOST` ใน `.env` ไม่ตรงกับชื่อ registry ใน image ทำให้ `--insecure-registry` ไม่ครอบ แก้ `.env` แล้ว `up -d deploy-host` |
+| `pull access denied for devsecops_workshop/jenkins` | image นี้ไม่มีบน registry ต้อง build ในเครื่อง compose ก่อน 15 ต.ค. 2569 ไม่มี `pull_policy: build` เลยลอง pull ก่อน ให้ `git pull` เอา compose ใหม่ หรือสั่ง `up -d --build` |
+| `toomanyrequests: You have reached your unauthenticated pull rate limit` | Docker Hub นับโควต้าต่อ IP ขาออก ทั้งห้องออกเน็ต IP เดียวกันจึงชนเร็ว ให้ `docker login` ด้วยบัญชี Docker Hub ของแต่ละคนก่อน up แล้วสั่ง up ซ้ำ (pull ต่อจากที่ค้าง) |
 | Vault ข้อมูลหายไหมถ้า restart | ไม่หาย เก็บใน volume `vault-data` และ unseal เองตอนเปิด (key อยู่ใน volume เดียวกัน ใช้ได้เฉพาะ workshop) |
 
 ## ปิดระบบ
@@ -564,15 +556,9 @@ docker compose --profile all down        # หยุด เก็บข้อม
 docker compose --profile all down -v     # หยุดและล้างข้อมูลทั้งหมด เริ่มใหม่จากศูนย์
 ```
 
-## เตรียมไฟล์ image offline (สำหรับผู้สอน)
-
-Docker Hub ให้ pull แบบไม่ login ได้ **100 ครั้งต่อชั่วโมงต่อ IP ขาออก** (วัดจาก header `ratelimit-limit: 100;w=3600`)
-ห้องอบรมที่ทุกเครื่องออกเน็ตผ่าน IP เดียวกัน ใช้เครื่องละ ~10 image แค่ 10 เครื่องก็ชนเพดานแล้ว และ Jenkins ต้อง build เอง (โหลด plugin จาก internet)
-
-บนเครื่องที่ up ระบบได้แล้ว รัน `bash save-images.sh` ได้ `images/*.tar.gz` หนึ่งไฟล์ต่อ image (20 ไฟล์ รวม ~5.3 GB นับ Jenkins ที่ build แล้ว, Harbor และ ZAP ด้วย) พร้อม `SHA256SUMS`
-แจกผ่าน USB หรือ file share ผู้เรียนวางในโฟลเดอร์ `images/` แล้วรัน `bash setup.sh`
-
 ## เวอร์ชันที่ใช้ (ตรวจกับ registry เมื่อ 11 ต.ค. 2569)
+
+ทุก service ใช้ image ทางการตรงๆ ยกเว้น Jenkins ที่ build ในเครื่องจาก `jenkins/Dockerfile` (ทุก `FROM` เป็น image ทางการ)
 
 | เครื่องมือ | image |
 |---|---|
@@ -581,7 +567,7 @@ Docker Hub ให้ pull แบบไม่ login ได้ **100 ครั้�
 | SonarQube Community | `sonarqube:26.9.0.129388-community` + `postgres:17.11-alpine` |
 | Trivy | `aquasec/trivy:0.75.0` |
 | BuildKit | `moby/buildkit:v0.33.1` |
-| Helm (คำสั่งใน image ของ Jenkins ไม่มี container) | `3.22.0` (คัดลอกจาก `alpine/helm:3.22.0` ตอน build) |
+| Helm (คำสั่งใน image ของ Jenkins ไม่มี container) | `3.22.0` (โหลดจาก `get.helm.sh` ตอน build ตรวจ sha256) |
 | OWASP ZAP | `zaproxy/zap-stable:20260807` (ZAP 2.17.0) |
 | Vault | `hashicorp/vault:2.1.1` |
 | Harbor | `goharbor/*:v2.14.2` |
