@@ -5,22 +5,11 @@
 
 pipeline หลักเป็น **Multibranch Pipeline** แบบเดียวกับ glo-portal ของจริง branch กับ tag กำหนดว่าไป env ไหน
 
-| push อะไร | env | TAG ของ image | เปิดดู |
-|---|---|---|---|
-| branch `develop` | dev | `dev-build-<N>` | `http://LAB_HOST:8088` |
-| branch `uat` | uat | `uat-build-<N>` | `http://LAB_HOST:8089` |
-| git tag เช่น `v1.0.0` | prd | ชื่อ tag | `http://LAB_HOST:8090` |
-| branch อื่น (`main`, `feature/*`) | ci | ไม่ build image | รันแค่ Vault + Gate 1-2 |
+README นี้เรียงตามลำดับที่ใช้จริง: เตรียมเครื่อง → เปิดระบบ → ทำ Lab ขั้น 1-6 → เจาะแต่ละเครื่องมือ (เรียงตาม stage ของ pipeline) → แก้ปัญหา
 
-ชื่อ image และ container ตั้งตามแบบ pipeline จริง (`${REGISTRY}/${PROJECT}/glo-backend-net`, release `${APP_PREFIX}-backend`):
+## ภาพรวม
 
-| env | image | container |
-|---|---|---|
-| dev | `LAB_HOST:5000/dev/glo-frontend:dev-build-<N>` | `glo-dev-frontend` |
-| uat | `LAB_HOST:5000/uat/glo-frontend:uat-build-<N>` | `glo-uat-frontend` |
-| prd | `LAB_HOST:5000/prd/glo-frontend:<tag>` | `glo-prd-frontend` |
-
-ส่วนแรกของ path คือ env (ใน Harbor คือชื่อ project) ส่วนที่สองคือชื่อ app ดูทั้งหมดใน registry: `curl http://LAB_HOST:5000/v2/_catalog`
+### pipeline ทำอะไรบ้าง
 
 ```
 GitLab --webhook (push / tag)--> Jenkins multibranch "sample-app"
@@ -38,19 +27,26 @@ GitLab --webhook (push / tag)--> Jenkins multibranch "sample-app"
    post               แจ้งผล (ของจริงส่ง LINE) + Trivy Report
 ```
 
-| บริการ | URL | เข้าระบบ |
+### branch / tag กำหนดว่า deploy ไป env ไหน
+
+| push อะไร | env | TAG ของ image | เปิดดู |
+|---|---|---|---|
+| branch `develop` | dev | `dev-build-<N>` | `http://LAB_HOST:8088` |
+| branch `uat` | uat | `uat-build-<N>` | `http://LAB_HOST:8089` |
+| git tag เช่น `v1.0.0` | prd | ชื่อ tag | `http://LAB_HOST:8090` |
+| branch อื่น (`main`, `feature/*`) | ci | ไม่ build image | รันแค่ Vault + Gate 1-2 |
+
+### ชื่อ image และ container
+
+ตั้งตามแบบ pipeline จริง (`${REGISTRY}/${PROJECT}/glo-backend-net`, release `${APP_PREFIX}-backend`):
+
+| env | image | container |
 |---|---|---|
-| GitLab | `http://LAB_HOST:8929` | `GITLAB_ROOT_USER` / `GITLAB_ROOT_PASSWORD` ใน `.env` (ตั้งให้ตอนเปิดครั้งแรก) |
-| Jenkins | `http://LAB_HOST:8080` | `JENKINS_ADMIN_ID` / `JENKINS_ADMIN_PASSWORD` ใน `.env` |
-| SonarQube | `http://LAB_HOST:9000` | ครั้งแรก `admin` / `admin` ระบบบังคับเปลี่ยน แล้วจดรหัสใหม่ไว้ที่ `SONAR_ADMIN_PASSWORD` ใน `.env` |
-| Vault | `http://LAB_HOST:8200` | Token = `VAULT_ROOT_TOKEN` ใน `.env` |
-| Harbor (profile `harbor` เปิดแยก) | `http://LAB_HOST:8085` | `admin` / `HARBOR_ADMIN_PASSWORD` ใน `.env` |
-| OWASP ZAP | ไม่เปิดพอร์ตออกนอก | daemon ไม่มีหน้าเว็บ Jenkins เรียกผ่าน `http://zap:8080` report ดูในหน้า build เมนู **ZAP Report** |
-| Trivy server | `http://LAB_HOST:4954` | ไม่มีหน้าเว็บ report ดูในหน้า build ของ Jenkins เมนู **Trivy Report** |
-| Registry | `http://LAB_HOST:5000/v2/_catalog` | เปิดโล่ง ไม่มีรหัส (เฉพาะ lab) |
-| BuildKit | ไม่เปิดพอร์ตออกนอก | Jenkins เรียกผ่าน `tcp://buildkitd:1234` |
-| sample-app dev / uat / prd | `http://LAB_HOST:8088` / `:8089` / `:8090` | ไม่มีหน้า login หน้าแรกแสดง env, version และ sha256 ของ secret ที่ได้จาก Vault |
-| deploy-host | ไม่เปิดพอร์ต 2375 ออกนอก | Jenkins สั่งผ่าน `DOCKER_HOST=tcp://deploy-host:2375` |
+| dev | `LAB_HOST:5000/dev/glo-frontend:dev-build-<N>` | `glo-dev-frontend` |
+| uat | `LAB_HOST:5000/uat/glo-frontend:uat-build-<N>` | `glo-uat-frontend` |
+| prd | `LAB_HOST:5000/prd/glo-frontend:<tag>` | `glo-prd-frontend` |
+
+ส่วนแรกของ path คือ env (ใน Harbor คือชื่อ project) ส่วนที่สองคือชื่อ app ดูทั้งหมดใน registry: `curl http://LAB_HOST:5000/v2/_catalog`
 
 ## ความต้องการของเครื่อง
 
@@ -61,6 +57,31 @@ GitLab --webhook (push / tag)--> Jenkins multibranch "sample-app"
 | RAM | 12 GB (GitLab ~4 GB, SonarQube ~2.5 GB, Jenkins ~1.5 GB) | 16 GB |
 | ดิสก์ | 40 GB ว่าง | 60 GB (image ~12 GB + data) |
 | เครือข่าย VMware | **Bridged** ให้ VM ได้ IP ในวงเดียวกับเครื่องที่เปิดเบราว์เซอร์ | ถ้าใช้ NAT เครื่องอื่นจะเข้า VM ไม่ได้ |
+
+### เครือข่ายของลูกค้า: ปลายทางที่ lab ต้องออกไปถึง
+
+| ปลายทาง | ใช้ตอนไหน | ถ้าโดนบล็อก |
+|---|---|---|
+| `registry-1.docker.io`, `auth.docker.io` | pull image (ไม่ต้องถ้าใช้ไฟล์ offline) และ BuildKit ดึง `python:3.12-slim` ตอน build sample-app ครั้งแรก | stage Build ตก |
+| `pypi.org`, `files.pythonhosted.org` | `pip install` ตอน build sample-app | stage Build ตก |
+| `mirror.gcr.io` (สำรอง `ghcr.io`) | Trivy โหลดฐานข้อมูลช่องโหว่ | Gate 2, 3 ตก |
+| `updates.jenkins.io` และ mirror | build image ของ Jenkins (ไม่ต้องถ้าใช้ไฟล์ offline) | `up --build` ตก |
+
+ถ้าต้องออกผ่าน proxy มีสองที่ต้องตั้ง:
+- docker daemon (ใช้ตอน pull): สร้าง `/etc/systemd/system/docker.service.d/http-proxy.conf`
+  ```ini
+  [Service]
+  Environment="HTTP_PROXY=http://proxy:8080" "HTTPS_PROXY=http://proxy:8080" "NO_PROXY=localhost,127.0.0.1"
+  ```
+  แล้ว `sudo systemctl daemon-reload && sudo systemctl restart docker`
+- container ที่ออก internet เอง (buildkitd, trivy-server): สร้าง `docker-compose.override.yml`
+  ```yaml
+  services:
+    buildkitd:
+      environment: { HTTPS_PROXY: "http://proxy:8080", NO_PROXY: "LAB_HOST_IP,registry,gitlab,jenkins,vault,sonarqube" }
+    trivy-server:
+      environment: { HTTPS_PROXY: "http://proxy:8080" }
+  ```
 
 ## เปิดระบบ (Ubuntu 24.04)
 
@@ -127,6 +148,7 @@ cd images && sha256sum -c --quiet SHA256SUMS && echo "ไฟล์ครบ" && 
 ```
 
 ไม่มีไฟล์ offline ก็ข้ามขั้นนี้ได้ ระบบจะ pull จาก internet แทน (ช้ากว่า และชนโควต้า Docker Hub ได้ถ้าทั้งห้องใช้ IP เดียวกัน)
+วิธีทำไฟล์ชุดนี้อยู่ท้าย README หัวข้อ "เตรียมไฟล์ image offline (สำหรับผู้สอน)"
 
 ### 4. เตรียมเครื่อง แล้วเปิดระบบ
 
@@ -146,46 +168,29 @@ docker compose --profile all ps      # รอจน gitlab ขึ้น (healthy
 เครื่องมีหลายการ์ดแลน และ IP ที่หาได้ไม่ใช่ตัวที่เบราว์เซอร์เข้าถึง: ลบ `.env` แล้วรัน `LAB_HOST=<IP> bash setup.sh` **ก่อน** up ครั้งแรก
 (GitLab ใช้ `LAB_HOST` สร้าง clone URL และ deploy-host ใช้ pull image)
 
+เปิดเฉพาะบางส่วนได้ด้วย profile: `gitlab` · `jenkins` · `sonar` · `trivy` · `zap` · `build` · `vault` · `deploy` · `harbor` (Harbor ไม่รวมใน `all`)
+(profile `jenkins` จะเปิด sonar, trivy, buildkit, registry, vault, deploy-host ไปด้วย เพราะ pipeline ต้องใช้ครบ)
+
 Docker Desktop บน Windows ใช้ได้เหมือนกัน แต่ไม่มี setup.sh: `cp .env.example .env` แก้เอง แล้วตั้ง
 `wsl -d docker-desktop sysctl -w vm.max_map_count=524288` (ต้องทำใหม่ทุกครั้งที่ restart Docker)
 
-### ไฟล์ image offline (สำหรับผู้สอน)
+## บริการและการเข้าระบบ
 
-Docker Hub ให้ pull แบบไม่ login ได้ **100 ครั้งต่อชั่วโมงต่อ IP ขาออก** (วัดจาก header `ratelimit-limit: 100;w=3600`)
-ห้องอบรมที่ทุกเครื่องออกเน็ตผ่าน IP เดียวกัน ใช้เครื่องละ ~10 image แค่ 10 เครื่องก็ชนเพดานแล้ว และ Jenkins ต้อง build เอง (โหลด plugin จาก internet)
+เปิดระบบเสร็จแล้ว เข้าแต่ละบริการได้ตามนี้ (`LAB_HOST` คือ IP ที่ setup.sh ใส่ไว้ใน `.env`)
 
-บนเครื่องที่ up ระบบได้แล้ว รัน `bash save-images.sh` ได้ `images/*.tar.gz` หนึ่งไฟล์ต่อ image (20 ไฟล์ รวม ~5.3 GB นับ Jenkins ที่ build แล้ว, Harbor และ ZAP ด้วย) พร้อม `SHA256SUMS`
-แจกผ่าน USB หรือ file share ผู้เรียนวางในโฟลเดอร์ `images/` แล้วรัน `bash setup.sh`
-
-### เครือข่ายของลูกค้า: ปลายทางที่ lab ต้องออกไปถึง
-
-| ปลายทาง | ใช้ตอนไหน | ถ้าโดนบล็อก |
+| บริการ | URL | เข้าระบบ |
 |---|---|---|
-| `registry-1.docker.io`, `auth.docker.io` | pull image (ไม่ต้องถ้าใช้ไฟล์ offline) และ BuildKit ดึง `python:3.12-slim` ตอน build sample-app ครั้งแรก | stage Build ตก |
-| `pypi.org`, `files.pythonhosted.org` | `pip install` ตอน build sample-app | stage Build ตก |
-| `mirror.gcr.io` (สำรอง `ghcr.io`) | Trivy โหลดฐานข้อมูลช่องโหว่ | Gate 2, 3 ตก |
-| `updates.jenkins.io` และ mirror | build image ของ Jenkins (ไม่ต้องถ้าใช้ไฟล์ offline) | `up --build` ตก |
-
-ถ้าต้องออกผ่าน proxy มีสองที่ต้องตั้ง:
-- docker daemon (ใช้ตอน pull): สร้าง `/etc/systemd/system/docker.service.d/http-proxy.conf`
-  ```ini
-  [Service]
-  Environment="HTTP_PROXY=http://proxy:8080" "HTTPS_PROXY=http://proxy:8080" "NO_PROXY=localhost,127.0.0.1"
-  ```
-  แล้ว `sudo systemctl daemon-reload && sudo systemctl restart docker`
-- container ที่ออก internet เอง (buildkitd, trivy-server): สร้าง `docker-compose.override.yml`
-  ```yaml
-  services:
-    buildkitd:
-      environment: { HTTPS_PROXY: "http://proxy:8080", NO_PROXY: "LAB_HOST_IP,registry,gitlab,jenkins,vault,sonarqube" }
-    trivy-server:
-      environment: { HTTPS_PROXY: "http://proxy:8080" }
-  ```
-
-ครั้งแรก GitLab ใช้เวลาประมาณ 3-5 นาทีกว่าจะเข้าเว็บได้ รอจนกว่า `docker compose --profile all ps` จะขึ้น `gitlab ... (healthy)`
-
-เปิดเฉพาะบางส่วนได้ด้วย profile: `gitlab` · `jenkins` · `sonar` · `trivy` · `zap` · `build` · `vault` · `deploy` · `harbor` (Harbor ไม่รวมใน `all`)
-(profile `jenkins` จะเปิด sonar, trivy, buildkit, registry, vault, deploy-host ไปด้วย เพราะ pipeline ต้องใช้ครบ)
+| GitLab | `http://LAB_HOST:8929` | `GITLAB_ROOT_USER` / `GITLAB_ROOT_PASSWORD` ใน `.env` (ตั้งให้ตอนเปิดครั้งแรก) |
+| Jenkins | `http://LAB_HOST:8080` | `JENKINS_ADMIN_ID` / `JENKINS_ADMIN_PASSWORD` ใน `.env` |
+| SonarQube | `http://LAB_HOST:9000` | ครั้งแรก `admin` / `admin` ระบบบังคับเปลี่ยน แล้วจดรหัสใหม่ไว้ที่ `SONAR_ADMIN_PASSWORD` ใน `.env` |
+| Vault | `http://LAB_HOST:8200` | Token = `VAULT_ROOT_TOKEN` ใน `.env` |
+| Harbor (profile `harbor` เปิดแยก) | `http://LAB_HOST:8085` | `admin` / `HARBOR_ADMIN_PASSWORD` ใน `.env` |
+| OWASP ZAP | ไม่เปิดพอร์ตออกนอก | daemon ไม่มีหน้าเว็บ Jenkins เรียกผ่าน `http://zap:8080` report ดูในหน้า build เมนู **ZAP Report** |
+| Trivy server | `http://LAB_HOST:4954` | ไม่มีหน้าเว็บ report ดูในหน้า build ของ Jenkins เมนู **Trivy Report** |
+| Registry | `http://LAB_HOST:5000/v2/_catalog` | เปิดโล่ง ไม่มีรหัส (เฉพาะ lab) |
+| BuildKit | ไม่เปิดพอร์ตออกนอก | Jenkins เรียกผ่าน `tcp://buildkitd:1234` |
+| sample-app dev / uat / prd | `http://LAB_HOST:8088` / `:8089` / `:8090` | ไม่มีหน้า login หน้าแรกแสดง env, version และ sha256 ของ secret ที่ได้จาก Vault |
+| deploy-host | ไม่เปิดพอร์ต 2375 ออกนอก | Jenkins สั่งผ่าน `DOCKER_HOST=tcp://deploy-host:2375` |
 
 ## ปลายทาง deploy: deploy-host
 
@@ -251,11 +256,6 @@ stage `Vault: Jenkins ดึง secret` พิสูจน์เรื่อง�
    - URL `http://jenkins:8080/multibranch-webhook-trigger/invoke?token=sample-app`
    - ติ๊ก **Push events** และ **Tag push events** · ปิด SSL verification · ไม่ต้องใส่ Secret token
    - กด Test > Push events ต้องได้ HTTP 200 (Jenkins จะ scan branch ใหม่ทันที และ build เฉพาะ branch ที่มี commit ใหม่)
-5. ปล่อย release ขึ้น prd ด้วย tag
-   ```bash
-   git tag -a v1.0.0 -m "release v1.0.0" && git push origin v1.0.0
-   ```
-   Jenkins จะสร้าง job `v1.0.0` ใต้ `sample-app` เอง แล้ว deploy ไปที่ `http://LAB_HOST:8090`
 
 ### 5. รันแล้วดู security gate ทำงาน
 รอบแรก **ต้องตก** ที่ Gate 2 เพราะ `requirements.txt` ตั้งใจ pin รุ่นเก่าไว้ trivy เจอ HIGH 3 ตัว
@@ -311,6 +311,7 @@ git tag -a v1.3.0 -m "release v1.3.0"
 git push origin v1.3.0
 ```
 
+Jenkins สร้าง job ของ tag ใต้ `sample-app` ให้เอง (เช่น `v1.3.0`) แล้ว deploy ไปที่ `http://LAB_HOST:8090`
 ดูว่าแต่ละ env รันเวอร์ชันไหน: เปิดหน้าเว็บ หรือ `curl http://LAB_HOST:8090/version` จะได้ `version`, `commit` และ `image`
 ดูประวัติ branch และ tag: `git log --oneline --graph --all` · ดู tag ทั้งหมด: `git tag -l`
 
@@ -325,96 +326,6 @@ git push origin v1.3.0
 | push tag แล้ว Jenkins ไม่ build | เช็ค Build strategies ว่าเพิ่ม **Tags** แล้ว (ขั้นที่ 4) และ tag ไม่เก่ากว่า 3 วัน |
 
 ถ้าสองคน push พร้อมกัน (เช่น uat กับ tag ติดกัน) Gate 4 จะต่อคิวใช้ ZAP ทีละ build เห็นข้อความ `ZAP กำลังสแกนให้ build อื่นอยู่ รอคิว`
-
-## เทียบกับ pipeline จริงของ glo-portal
-
-`Jenkinsfile` ยกโครงมาจาก pipeline จริง (Prepare, Environment Check, Vault: Pull Secrets, Verify App Version, แจ้งผล LINE
-และ `FAILED_STAGE` / `FAILED_MSG`) แต่แก้จุดที่เจอตอนรีวิวไว้ ใช้เป็นโจทย์ให้ผู้เรียนหาว่าของเดิมเสี่ยงตรงไหน
-
-| เรื่อง | ของจริง | ใน workshop |
-|---|---|---|
-| Sonar / Quality Gate | ปิดด้วย `when { expression { false } }` | เปิดทุก env และ branch อื่นต้องผ่าน gate ก่อน merge |
-| branch อื่นนอกจาก develop/uat | `NOT_BUILT` ข้ามไปเลย | env `ci` รัน Vault + Gate 1-2 |
-| trivy image | สแกนหลัง push | ตกที่ CRITICAL ก่อน deploy |
-| อ่าน secret จาก Vault | grep/sed (พังถ้าค่ามี `,` หรือ `:`) และ token ผ่าน Groovy string | `ci/vault-env.sh` ใช้ jq, token อยู่ใน shell และ revoke ทุกครั้ง |
-| Environment Check | พิมพ์ `[FAIL]` แล้วไปต่อ | ตกทันทีถ้า server ไม่พร้อม |
-| สั่ง BuildKit | `docker exec buildkitd` (Jenkins ต้องเข้า docker.sock) | `buildctl` ผ่าน TCP ไม่แตะ docker.sock |
-| kubeconfig | `kubeconfig-dev` ใช้กับทุก env | แต่ละ env เป็น container แยก ชี้ secret แยก path |
-| try/catch | ซ้ำทุก stage | function `tracked { }` เขียนครั้งเดียว |
-
-สิ่งที่ยังเหมือนของจริงโดยตั้งใจ ให้ผู้เรียนเสนอทางแก้เอง:
-- AppRole ตัวเดียวอ่าน secret ได้ทุก env (`secret/dev/*`, `uat/*`, `prd/*`) ควรแยก role ต่อ env
-- tag ไหนก็ขึ้น prd ได้ทันที ไม่มีขั้นอนุมัติ ลองเพิ่ม `input` ก่อน Deploy เมื่อ `ENV_NAME == 'prd'`
-
-## ดู Trivy report
-
-trivy-server ไม่มีหน้าเว็บ pipeline จึงเก็บ report ไว้กับ build ใน Jenkins ทุกครั้ง แม้ gate จะตก
-`ci/trivy-gate.sh` สแกนครั้งเดียว แล้วแตกผลออกเป็นสามแบบ
-
-| ดูที่ไหน | ได้อะไร |
-|---|---|
-| หน้า build > เมนู **Trivy Report** (แท็บ `trivy fs` / `trivy image`) | report HTML ทุกระดับความรุนแรง แยกตาม package พร้อม CVE, รุ่นที่แก้แล้ว และลิงก์อ่านต่อ |
-| หน้า build > **Build Artifacts** > `reports/*.json` | ผลดิบ JSON เอาไปเข้า tool อื่นต่อได้ (DefectDojo, Excel) |
-| Console Output | บรรทัดสรุป `ผลทุกระดับ: HIGH=44 LOW=62 ...` และตารางเฉพาะระดับที่ gate ใช้ตัดสิน |
-
-ตัวอย่างจาก build จริง: Gate 3 (`trivy image`) **ผ่าน** ทั้งที่ report มี HIGH 44 ตัว เพราะ gate นี้ตั้งให้ตกเฉพาะ CRITICAL
-HIGH ส่วนใหญ่มาจาก base image `python:3.12-slim` ที่ทีมแก้เองไม่ได้ ใช้ report นี้คุยกับผู้เรียนเรื่องการเลือกเกณฑ์ gate
-
-report จะเปิดได้เพราะ compose ตั้ง `-Dhudson.model.DirectoryBrowserSupport.CSP=` ให้ Jenkins แล้ว
-(report มี inline style/script ค่านี้ใช้เฉพาะ lab งานจริงให้ตั้ง Resource Root URL ของ Jenkins แทน)
-
-สแกนเองนอก pipeline แล้วได้ report HTML (คำสั่ง trivy อยู่ใน Jenkins เท่านั้น ไม่มี container trivy แยก):
-```bash
-docker compose exec jenkins trivy image --server http://trivy-server:4954 --insecure \
-  --format template --template @/opt/trivy/html.tpl -o /tmp/trivy-report.html LAB_HOST:5000/prd/glo-frontend:v1.1.0
-docker compose cp jenkins:/tmp/trivy-report.html ./trivy-report.html
-```
-
-## OWASP ZAP: Gate 4 (DAST)
-
-SonarQube กับ Trivy ตรวจโค้ดและ dependency ส่วน ZAP ตรวจ **เว็บที่รันอยู่จริง** จึงอยู่หลัง Deploy
-pipeline ทำ baseline scan (spider หา URL แล้ว passive scan ดู request / response ไม่ส่ง payload โจมตี) ผ่าน API ของ container `zap`
-
-| ดูที่ไหน | ได้อะไร |
-|---|---|
-| หน้า build > เมนู **ZAP Report** | report HTML แยกตาม alert พร้อม URL ที่เจอ คำอธิบาย และวิธีแก้ |
-| หน้า build > **Build Artifacts** > `reports/zap.json` | ผลดิบ JSON |
-| Console Output stage Gate 4 | บรรทัด `ผลทุกระดับ: High=0 Medium=6 Low=10 ...` และรายการ alert |
-
-ผลจากการทดสอบจริงกับ glo-frontend: High 0, Medium 6 (ไม่มี CSP header, ไม่มี anti-clickjacking header), Low 10
-รวมถึง **Private IP Disclosure** เพราะหน้าเว็บแสดงชื่อ image ที่มี IP ภายใน เป็นตัวอย่างที่ SAST มองไม่เห็นแต่ DAST เห็น
-
-- เลือกระดับที่ทำให้ตกได้ที่ parameter `ZAP_FAIL_ON` (High / Medium / none) ลอง Medium จะเห็น Gate 4 ตก
-- baseline ไม่เจอ SQL injection ใน `/tickets` เพราะไม่ยิง payload ต้องใช้ active scan ซึ่งห้ามยิงใส่ระบบจริงโดยไม่ได้รับอนุญาต
-- งานจริงทำ Gate 4 ที่ dev / uat: ตกที่ dev แปลว่ายังไม่ควร tag ขึ้น prd
-- สแกนเองนอก pipeline (ได้ report ที่ /tmp/reports ใน container jenkins):
-  `docker compose cp sample-app/ci/zap-gate.sh jenkins:/tmp/` แล้ว `docker compose exec -w /tmp jenkins bash zap-gate.sh http://deploy-host:8088 High`
-
-## Jenkins แบบ Scripted Pipeline
-
-pipeline หลักคือ Multibranch (`Jenkinsfile`) ส่วน `Jenkinsfile.scripted` มีไว้ฝึกเขียน Groovy
-ล็อกไว้ที่ branch `develop` และ deploy ทับ env dev (TAG `scripted-build-<N>`) แล้วสั่ง build develop ใน multibranch อีกรอบ dev ก็จะกลับมา
-
-| ไฟล์ | แบบ | เหมาะกับ |
-|---|---|---|
-| `Jenkinsfile` | Declarative (`pipeline { stages { } }`) ใช้ใน Multibranch | อ่านง่าย มีโครงตายตัว ใช้เป็นหลักใน lab |
-| `Jenkinsfile.scripted` | Scripted (`node { }` เป็น Groovy ทั้งไฟล์) | เขียน logic เองได้: ตัวแปร, `if`, function, `try/catch/finally`, `parallel`, `retry` |
-
-สิ่งที่ `Jenkinsfile.scripted` โชว์เพิ่ม:
-- Gate 1 (Sonar) กับ Gate 2 (trivy fs) รัน **พร้อมกัน** ด้วย `parallel` และ `failFast: false` ให้เห็นผลครบทั้งสอง gate
-- function `gate()` ของเราเอง จดผลแต่ละ gate แล้วพิมพ์สรุป PASS/FAIL ท้าย build ใน `finally`
-- parameter `TRIVY_FS_SEVERITY` เลือกเกณฑ์ Gate 2 ตอนกด Build with Parameters
-- `retry(12)` + `sleep` ของ Jenkins แทน loop ใน shell ตอนเช็คว่า app ขึ้น
-- `currentBuild.description` แสดง commit กับ tag ในหน้ารายการ build
-
-สร้าง job ที่แก้ script ในหน้า Jenkins ได้:
-1. New Item > Pipeline ชื่อ `sample-app-scripted`
-2. Pipeline > Definition: **Pipeline script** แล้ววางเนื้อหาทั้งไฟล์ `Jenkinsfile.scripted` ลงไป (ติ๊ก Use Groovy Sandbox ไว้)
-3. Save > **Build Now** ครั้งแรก (ครั้งแรกยังไม่มีเมนู parameter เพราะ `properties()` เพิ่งถูกตั้ง ครั้งต่อไปจะเป็น Build with Parameters)
-
-script ที่วางในหน้า Jenkins ไม่ได้มาจาก Git จึงต่อ webhook ไม่ได้และไม่มีประวัติการแก้ ใช้สำหรับทดลองเขียน
-ถ้าต้องการให้ webhook สั่งได้ ให้ใช้ Definition: Pipeline script from SCM แล้วตั้ง Script Path เป็น `Jenkinsfile.scripted`
-ทั้งสองแบบเรียก `ci/vault-demo.sh` และ `ci/trivy-gate.sh` ตัวเดียวกัน แก้ที่เดียวได้ผลทั้งคู่
 
 ## สาธิต Vault: Jenkins เอา secret มาได้อย่างไร
 
@@ -469,6 +380,50 @@ docker compose exec -e VAULT_TOKEN=<VAULT_ROOT_TOKEN> vault \
 ข้อจำกัดที่ควรบอกผู้เรียน: คนที่เข้าถึง deploy-host ได้ยังเห็นค่าผ่าน `docker inspect glo-dev-frontend`
 งานจริงจึงให้ app ไปอ่าน Vault เอง (Vault Agent) หรือใช้ secret ของ orchestrator แทน env
 
+## ดู Trivy report
+
+trivy-server ไม่มีหน้าเว็บ pipeline จึงเก็บ report ไว้กับ build ใน Jenkins ทุกครั้ง แม้ gate จะตก
+`ci/trivy-gate.sh` สแกนครั้งเดียว แล้วแตกผลออกเป็นสามแบบ
+
+| ดูที่ไหน | ได้อะไร |
+|---|---|
+| หน้า build > เมนู **Trivy Report** (แท็บ `trivy fs` / `trivy image`) | report HTML ทุกระดับความรุนแรง แยกตาม package พร้อม CVE, รุ่นที่แก้แล้ว และลิงก์อ่านต่อ |
+| หน้า build > **Build Artifacts** > `reports/*.json` | ผลดิบ JSON เอาไปเข้า tool อื่นต่อได้ (DefectDojo, Excel) |
+| Console Output | บรรทัดสรุป `ผลทุกระดับ: HIGH=44 LOW=62 ...` และตารางเฉพาะระดับที่ gate ใช้ตัดสิน |
+
+ตัวอย่างจาก build จริง: Gate 3 (`trivy image`) **ผ่าน** ทั้งที่ report มี HIGH 44 ตัว เพราะ gate นี้ตั้งให้ตกเฉพาะ CRITICAL
+HIGH ส่วนใหญ่มาจาก base image `python:3.12-slim` ที่ทีมแก้เองไม่ได้ ใช้ report นี้คุยกับผู้เรียนเรื่องการเลือกเกณฑ์ gate
+
+report จะเปิดได้เพราะ compose ตั้ง `-Dhudson.model.DirectoryBrowserSupport.CSP=` ให้ Jenkins แล้ว
+(report มี inline style/script ค่านี้ใช้เฉพาะ lab งานจริงให้ตั้ง Resource Root URL ของ Jenkins แทน)
+
+สแกนเองนอก pipeline แล้วได้ report HTML (คำสั่ง trivy อยู่ใน Jenkins เท่านั้น ไม่มี container trivy แยก):
+```bash
+docker compose exec jenkins trivy image --server http://trivy-server:4954 --insecure \
+  --format template --template @/opt/trivy/html.tpl -o /tmp/trivy-report.html LAB_HOST:5000/prd/glo-frontend:v1.1.0
+docker compose cp jenkins:/tmp/trivy-report.html ./trivy-report.html
+```
+
+## OWASP ZAP: Gate 4 (DAST)
+
+SonarQube กับ Trivy ตรวจโค้ดและ dependency ส่วน ZAP ตรวจ **เว็บที่รันอยู่จริง** จึงอยู่หลัง Deploy
+pipeline ทำ baseline scan (spider หา URL แล้ว passive scan ดู request / response ไม่ส่ง payload โจมตี) ผ่าน API ของ container `zap`
+
+| ดูที่ไหน | ได้อะไร |
+|---|---|
+| หน้า build > เมนู **ZAP Report** | report HTML แยกตาม alert พร้อม URL ที่เจอ คำอธิบาย และวิธีแก้ |
+| หน้า build > **Build Artifacts** > `reports/zap.json` | ผลดิบ JSON |
+| Console Output stage Gate 4 | บรรทัด `ผลทุกระดับ: High=0 Medium=6 Low=10 ...` และรายการ alert |
+
+ผลจากการทดสอบจริงกับ glo-frontend: High 0, Medium 6 (ไม่มี CSP header, ไม่มี anti-clickjacking header), Low 10
+รวมถึง **Private IP Disclosure** เพราะหน้าเว็บแสดงชื่อ image ที่มี IP ภายใน เป็นตัวอย่างที่ SAST มองไม่เห็นแต่ DAST เห็น
+
+- เลือกระดับที่ทำให้ตกได้ที่ parameter `ZAP_FAIL_ON` (High / Medium / none) ลอง Medium จะเห็น Gate 4 ตก
+- baseline ไม่เจอ SQL injection ใน `/tickets` เพราะไม่ยิง payload ต้องใช้ active scan ซึ่งห้ามยิงใส่ระบบจริงโดยไม่ได้รับอนุญาต
+- งานจริงทำ Gate 4 ที่ dev / uat: ตกที่ dev แปลว่ายังไม่ควร tag ขึ้น prd
+- สแกนเองนอก pipeline (ได้ report ที่ /tmp/reports ใน container jenkins):
+  `docker compose cp sample-app/ci/zap-gate.sh jenkins:/tmp/` แล้ว `docker compose exec -w /tmp jenkins bash zap-gate.sh http://deploy-host:8088 High`
+
 ## สาธิต Harbor (เปิดแยกด้วย profile harbor)
 
 Harbor v2.14.2 (9 container ตามแบบติดตั้งมาตรฐาน) แยกจาก registry ที่ pipeline ใช้ เปิดเฉพาะตอนสาธิต:
@@ -509,6 +464,32 @@ image ที่ push เข้าไปจะไม่ถูกสแกนเ�
 - **เก็บข้อมูลใน named volume แทน `/data`** มี `harbor-volume-init` คอย chown ให้ uid 10000
 - **ไม่มี `harbor-log`** ดู log ด้วย `docker compose logs harbor-core`
 
+## Jenkins แบบ Scripted Pipeline
+
+pipeline หลักคือ Multibranch (`Jenkinsfile`) ส่วน `Jenkinsfile.scripted` มีไว้ฝึกเขียน Groovy
+ล็อกไว้ที่ branch `develop` และ deploy ทับ env dev (TAG `scripted-build-<N>`) แล้วสั่ง build develop ใน multibranch อีกรอบ dev ก็จะกลับมา
+
+| ไฟล์ | แบบ | เหมาะกับ |
+|---|---|---|
+| `Jenkinsfile` | Declarative (`pipeline { stages { } }`) ใช้ใน Multibranch | อ่านง่าย มีโครงตายตัว ใช้เป็นหลักใน lab |
+| `Jenkinsfile.scripted` | Scripted (`node { }` เป็น Groovy ทั้งไฟล์) | เขียน logic เองได้: ตัวแปร, `if`, function, `try/catch/finally`, `parallel`, `retry` |
+
+สิ่งที่ `Jenkinsfile.scripted` โชว์เพิ่ม:
+- Gate 1 (Sonar) กับ Gate 2 (trivy fs) รัน **พร้อมกัน** ด้วย `parallel` และ `failFast: false` ให้เห็นผลครบทั้งสอง gate
+- function `gate()` ของเราเอง จดผลแต่ละ gate แล้วพิมพ์สรุป PASS/FAIL ท้าย build ใน `finally`
+- parameter `TRIVY_FS_SEVERITY` เลือกเกณฑ์ Gate 2 ตอนกด Build with Parameters
+- `retry(12)` + `sleep` ของ Jenkins แทน loop ใน shell ตอนเช็คว่า app ขึ้น
+- `currentBuild.description` แสดง commit กับ tag ในหน้ารายการ build
+
+สร้าง job ที่แก้ script ในหน้า Jenkins ได้:
+1. New Item > Pipeline ชื่อ `sample-app-scripted`
+2. Pipeline > Definition: **Pipeline script** แล้ววางเนื้อหาทั้งไฟล์ `Jenkinsfile.scripted` ลงไป (ติ๊ก Use Groovy Sandbox ไว้)
+3. Save > **Build Now** ครั้งแรก (ครั้งแรกยังไม่มีเมนู parameter เพราะ `properties()` เพิ่งถูกตั้ง ครั้งต่อไปจะเป็น Build with Parameters)
+
+script ที่วางในหน้า Jenkins ไม่ได้มาจาก Git จึงต่อ webhook ไม่ได้และไม่มีประวัติการแก้ ใช้สำหรับทดลองเขียน
+ถ้าต้องการให้ webhook สั่งได้ ให้ใช้ Definition: Pipeline script from SCM แล้วตั้ง Script Path เป็น `Jenkinsfile.scripted`
+ทั้งสองแบบเรียก `ci/vault-demo.sh` และ `ci/trivy-gate.sh` ตัวเดียวกัน แก้ที่เดียวได้ผลทั้งคู่
+
 ## ใช้เครื่องมือด้วยมือ (นอก Jenkins)
 
 ```bash
@@ -530,6 +511,26 @@ SONAR_TOKEN=<token> docker compose run --rm sonar-scanner
 # Vault
 docker compose exec -e VAULT_TOKEN=<VAULT_ROOT_TOKEN> vault vault kv get secret/dev/app-env
 ```
+
+## เทียบกับ pipeline จริงของ glo-portal
+
+`Jenkinsfile` ยกโครงมาจาก pipeline จริง (Prepare, Environment Check, Vault: Pull Secrets, Verify App Version, แจ้งผล LINE
+และ `FAILED_STAGE` / `FAILED_MSG`) แต่แก้จุดที่เจอตอนรีวิวไว้ ใช้เป็นโจทย์ให้ผู้เรียนหาว่าของเดิมเสี่ยงตรงไหน
+
+| เรื่อง | ของจริง | ใน workshop |
+|---|---|---|
+| Sonar / Quality Gate | ปิดด้วย `when { expression { false } }` | เปิดทุก env และ branch อื่นต้องผ่าน gate ก่อน merge |
+| branch อื่นนอกจาก develop/uat | `NOT_BUILT` ข้ามไปเลย | env `ci` รัน Vault + Gate 1-2 |
+| trivy image | สแกนหลัง push | ตกที่ CRITICAL ก่อน deploy |
+| อ่าน secret จาก Vault | grep/sed (พังถ้าค่ามี `,` หรือ `:`) และ token ผ่าน Groovy string | `ci/vault-env.sh` ใช้ jq, token อยู่ใน shell และ revoke ทุกครั้ง |
+| Environment Check | พิมพ์ `[FAIL]` แล้วไปต่อ | ตกทันทีถ้า server ไม่พร้อม |
+| สั่ง BuildKit | `docker exec buildkitd` (Jenkins ต้องเข้า docker.sock) | `buildctl` ผ่าน TCP ไม่แตะ docker.sock |
+| kubeconfig | `kubeconfig-dev` ใช้กับทุก env | แต่ละ env เป็น container แยก ชี้ secret แยก path |
+| try/catch | ซ้ำทุก stage | function `tracked { }` เขียนครั้งเดียว |
+
+สิ่งที่ยังเหมือนของจริงโดยตั้งใจ ให้ผู้เรียนเสนอทางแก้เอง:
+- AppRole ตัวเดียวอ่าน secret ได้ทุก env (`secret/dev/*`, `uat/*`, `prd/*`) ควรแยก role ต่อ env
+- tag ไหนก็ขึ้น prd ได้ทันที ไม่มีขั้นอนุมัติ ลองเพิ่ม `input` ก่อน Deploy เมื่อ `ENV_NAME == 'prd'`
 
 ## ปัญหาที่เจอตอนทดสอบ
 
@@ -562,6 +563,14 @@ docker compose exec -e VAULT_TOKEN=<VAULT_ROOT_TOKEN> vault vault kv get secret/
 docker compose --profile all down        # หยุด เก็บข้อมูลไว้
 docker compose --profile all down -v     # หยุดและล้างข้อมูลทั้งหมด เริ่มใหม่จากศูนย์
 ```
+
+## เตรียมไฟล์ image offline (สำหรับผู้สอน)
+
+Docker Hub ให้ pull แบบไม่ login ได้ **100 ครั้งต่อชั่วโมงต่อ IP ขาออก** (วัดจาก header `ratelimit-limit: 100;w=3600`)
+ห้องอบรมที่ทุกเครื่องออกเน็ตผ่าน IP เดียวกัน ใช้เครื่องละ ~10 image แค่ 10 เครื่องก็ชนเพดานแล้ว และ Jenkins ต้อง build เอง (โหลด plugin จาก internet)
+
+บนเครื่องที่ up ระบบได้แล้ว รัน `bash save-images.sh` ได้ `images/*.tar.gz` หนึ่งไฟล์ต่อ image (20 ไฟล์ รวม ~5.3 GB นับ Jenkins ที่ build แล้ว, Harbor และ ZAP ด้วย) พร้อม `SHA256SUMS`
+แจกผ่าน USB หรือ file share ผู้เรียนวางในโฟลเดอร์ `images/` แล้วรัน `bash setup.sh`
 
 ## เวอร์ชันที่ใช้ (ตรวจกับ registry เมื่อ 11 ต.ค. 2569)
 
